@@ -21,7 +21,7 @@ Train and merge two residual experts on **LIBERO Object** tasks 6 and 8 with **O
 Requires Linux, NVIDIA GPUs, Docker, and the NVIDIA Container Toolkit.
 
 ```bash
-git clone https://github.com/ResMerge/resmerge-official.git
+git clone https://github.com/zhucoffee/resmerge-official.git
 cd resmerge-official
 mkdir -p "$HOME/.cache/huggingface"
 
