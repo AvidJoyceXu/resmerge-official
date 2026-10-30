@@ -1,18 +1,24 @@
-# ResMerge
+<div align="center">
 
-**Residual Policy Learning and Merging for Continual Adaptation of Pre-trained Robot Policies**
+<h1>🤖 ResMerge</h1>
 
-[Paper](https://openreview.net/forum?id=wLtzr7PNBI) · [Project Website](https://resmerge.github.io/)
+<p><b>Residual Policy Learning and Merging for<br>Continual Adaptation of Pre-trained Robot Policies</b></p>
 
-ResMerge learns lightweight residual policies on top of a frozen robot policy and merges compatible experts using Residual-Field Consistency (RFC).
+<a href="https://openreview.net/forum?id=wLtzr7PNBI"><img src="https://img.shields.io/badge/%F0%9F%93%84_Paper-OpenReview-b31b1b?style=for-the-badge" alt="Paper"></a>
+<a href="https://resmerge.github.io/"><img src="https://img.shields.io/badge/%F0%9F%8C%90_Project-Website-2563eb?style=for-the-badge" alt="Project Website"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-10b981?style=for-the-badge" alt="License: Apache 2.0"></a>
 
-## Quick Start
+</div>
 
-The example below trains and merges two residual policies on LIBERO Object tasks 6 and 8 with OpenVLA-OFT.
+**Learn residuals. Check compatibility. Merge robot policies.** ResMerge enables continual adaptation of a frozen robot policy with lightweight residual experts and Residual-Field Consistency (RFC).
 
-### 1. Set up the environment
+## 🚀 Quick Start
 
-Use a Linux machine with NVIDIA GPUs, Docker, and the NVIDIA Container Toolkit.
+Train and merge two residual experts on **LIBERO Object** tasks 6 and 8 with **OpenVLA-OFT**.
+
+### 🛠️ Installation
+
+Requires Linux, NVIDIA GPUs, Docker, and the NVIDIA Container Toolkit.
 
 ```bash
 git clone https://github.com/ResMerge/resmerge-official.git
@@ -28,7 +34,7 @@ docker run -it --gpus all --shm-size 64g \
   /bin/bash
 ```
 
-Run the remaining commands inside the container:
+Inside the container:
 
 ```bash
 cd /workspace/RLinf
@@ -41,9 +47,9 @@ python -m pip install -r requirements/resmerge-analysis.txt
 export RESMERGE_OBJECT_BASE="$(python -c 'from huggingface_hub import snapshot_download; print(snapshot_download("Haozhan72/Openvla-oft-SFT-libero-object-traj1"))')"
 ```
 
-### 2. Train residual policies
+### 🧠 Train
 
-Run the two training jobs sequentially. Adjust GPU placement, batch sizes, and the training budget in the corresponding [task configurations](examples/embodiment/config/) for your machine.
+Train one residual expert per task:
 
 ```bash
 bash examples/embodiment/run_embodiment.sh \
@@ -53,7 +59,7 @@ bash examples/embodiment/run_embodiment.sh \
   libero_object_task8_lora_residual_sac_openvlaoft
 ```
 
-Checkpoints are saved to `logs/<run>/<experiment>/checkpoints/global_step_<step>/actor/huggingface_model/`. Set the paths to the checkpoints you want to merge:
+Checkpoints: `logs/<run>/<experiment>/checkpoints/global_step_<step>/actor/huggingface_model/`. Set the paths to your trained experts:
 
 ```bash
 export CKPT6=/absolute/path/to/task6/actor/huggingface_model
@@ -61,9 +67,11 @@ export CKPT8=/absolute/path/to/task8/actor/huggingface_model
 export MERGED=/workspace/RLinf/merged_policy_dir/object_6_8
 ```
 
-### 3. Compute RFC and merge
+Training settings are in the [task configs](examples/embodiment/config/).
 
-Compute pairwise RFC using probe states collected by the frozen base policy:
+### 🔀 Compute RFC & Merge
+
+Measure compatibility between the two experts:
 
 ```bash
 export MUJOCO_GL=osmesa
@@ -77,7 +85,7 @@ python examples/embodiment/eval/correction_field_analysis/analyze_correction_vec
   --obs_mode privileged --tau 0.5
 ```
 
-If the pair meets your RFC threshold, merge the residual checkpoints:
+Merge the pair if its RFC meets the threshold:
 
 ```bash
 python toolkits/merge_lora_policies/quick_merge.py \
@@ -85,9 +93,10 @@ python toolkits/merge_lora_policies/quick_merge.py \
   --output_path "$MERGED" --restore_norm
 ```
 
-### 4. Refine the merged policy
+<details>
+<summary><b>✨ Optional: refine the merged policy</b></summary>
 
-Continue training the merged residual on both tasks. This example uses 600 epochs and saves a checkpoint every 100 epochs:
+Train the merged residual on both tasks:
 
 ```bash
 export MUJOCO_GL=egl
@@ -103,22 +112,24 @@ python examples/embodiment/train_embodied_agent.py \
   runner.logger.log_path=/workspace/RLinf/logs/refine_object_6_8
 ```
 
-### 5. Evaluate
+Use the saved `actor/huggingface_model/` checkpoint for evaluation.
 
-Choose a trained, merged, or refined checkpoint directory. The example below evaluates the merged policy on both tasks:
+</details>
+
+### 📊 Evaluate
+
+Evaluate the merged policy on both tasks:
 
 ```bash
-export POLICY="$MERGED"
+bash examples/embodiment/eval_single_task.sh \
+  libero_object_task6_lora_residual_sac_openvlaoft "$MERGED" 6
 
 bash examples/embodiment/eval_single_task.sh \
-  libero_object_task6_lora_residual_sac_openvlaoft "$POLICY" 6
-
-bash examples/embodiment/eval_single_task.sh \
-  libero_object_task8_lora_residual_sac_openvlaoft "$POLICY" 8
+  libero_object_task8_lora_residual_sac_openvlaoft "$MERGED" 8
 ```
 
-Evaluation outputs are saved to `results/single_eval_<timestamp>/`. To evaluate a refined policy, set `POLICY` to its saved `actor/huggingface_model/` directory.
+Results: `results/single_eval_<timestamp>/`. Replace `$MERGED` with any trained or refined checkpoint to evaluate it.
 
 ---
 
-Built on [RLinf](https://github.com/RLinf/RLinf), [OpenVLA-OFT](https://github.com/moojink/openvla-oft), and [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO). Licensed under [Apache 2.0](LICENSE).
+🙏 Built on [RLinf](https://github.com/RLinf/RLinf), [OpenVLA-OFT](https://github.com/moojink/openvla-oft), and [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO). Released under [Apache 2.0](LICENSE).
