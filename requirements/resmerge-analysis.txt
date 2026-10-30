@@ -1,0 +1,5 @@
+# Additional packages imported by the RFC analysis entry point.
+matplotlib
+seaborn
+h5py
+safetensors

@@ -1,0 +1,27 @@
+model_type: "lora_residual_policy"
+
+model_path: ""
+
+policy_setup: "panda-ee-dpos"
+
+# RGB observation mode, mirroring the real-robot residual input:
+#   2 x 384 frozen-ViT features (single third-person camera, 2 stacked frames)
+# + 2 x 39 LIBERO proprioception (robot0_proprio-state, 2 stacked frames)
+# = 846
+# Unlike the privileged mode this width is independent of the number of scene
+# objects, so residuals stay merge-compatible across LIBERO suites.
+obs_dim: 846
+action_dim: 7
+num_action_chunks: 8
+hidden_dim: 256
+
+precision: "32"
+add_value_head: False
+add_q_head: True
+q_head_type: "default"  # ["default", "crossq"]
+
+# Residual policy specific
+actor_input: "obs"  # ["obs", "obs_base_action"] - Will be overridden by network.actor_input
+
+is_lora: False
+lora_rank: 16  # LoRA rank for LoRA residual policy

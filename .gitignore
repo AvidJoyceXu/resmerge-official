@@ -1,0 +1,30 @@
+# Local environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+.env
+.env.*
+
+# Experiment output, downloaded assets, and checkpoints
+logs/
+results/
+outputs/
+multirun/
+wandb/
+merged_policy_dir/
+checkpoints/
+hf/
+.cache/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.hdf5
+*.h5
+*.mp4
+*.avi
