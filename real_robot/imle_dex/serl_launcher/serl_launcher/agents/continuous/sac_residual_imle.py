@@ -1,3 +1,4 @@
+# Modified by the ResMerge contributors, 2026-10-31; see real_robot/THIRD_PARTY.md.
 """
 Residual SAC with frozen IMLE: critics use full executed actions; target/actor actions add
 alpha*tanh(u) to base actions. The Gaussian policy emits unsquashed u. Entropy uses the
@@ -87,17 +88,18 @@ class SACResidualIMLEAgent(SACAgent):
         target_next_min_q = target_next_qs.min(axis=0)
         chex.assert_shape(target_next_min_q, (batch_size,))
 
-        target_q = (
-            batch["rewards"]
-            + self.config["discount"] * batch["masks"] * target_next_min_q
-        )
-        chex.assert_shape(target_q, (batch_size,))
-
+        target_next_value = target_next_min_q
         if self.config["backup_entropy"]:
             action_dim = u_next.shape[-1]
             log_p_next = self._maybe_normalize_logp(log_p_next, action_dim)
             temperature = self.forward_temperature()
-            target_q = target_q - temperature * log_p_next
+            target_next_value = target_next_value - temperature * log_p_next
+
+        target_q = (
+            batch["rewards"]
+            + self.config["discount"] * batch["masks"] * target_next_value
+        )
+        chex.assert_shape(target_q, (batch_size,))
 
         a_taken = batch["actions"][..., :-1] if self.config["fix_gripper"] else batch["actions"]
         predicted_qs = self.forward_critic(

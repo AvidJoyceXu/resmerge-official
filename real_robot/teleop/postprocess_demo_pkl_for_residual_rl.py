@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by the ResMerge contributors, 2026-10-31; see real_robot/THIRD_PARTY.md.
 """
 Post-process demo pkl for residual RL training.
 
@@ -861,7 +862,7 @@ def main() -> None:
     p.add_argument(
         "--sac_imle_feat_concat_action_base",
         action="store_true",
-        help="If set, compute obs imle_preproj with action_base concatenation (next_obs still no action_base).",
+        help="Unsupported: leave disabled to use the maintained IMLE pre-projection feature layout.",
     )
     p.add_argument(
         "--keep_obs_images",
@@ -910,6 +911,11 @@ def main() -> None:
     )
     args = p.parse_args(argv_rest)
 
+    if args.sac_imle_feat_concat_action_base:
+        p.error(
+            "Base-action feature concatenation is not supported; "
+            "leave --sac_imle_feat_concat_action_base disabled."
+        )
     if bool(args.input_pkl) == bool(args.input_zarr):
         raise ValueError("Specify exactly one input: --input_pkl or --input_zarr")
     input_path = os.path.abspath(args.input_pkl) if args.input_pkl else ""

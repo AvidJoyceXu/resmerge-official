@@ -1,4 +1,6 @@
 # Copyright 2025 The RLinf Authors.
+# Modified by the ResMerge contributors, 2026-10-31: merge validation, pruning
+# compensation, zero-weight handling and interoperable actor exports.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,6 +27,7 @@ import math
 import os
 import glob
 import json
+import copy
 from typing import List, Dict, Optional
 
 try:
@@ -180,8 +183,13 @@ def _save_checkpoint_safetensors(
     
     os.makedirs(output_path, exist_ok=True)
     
-    # Convert merged_params to state_dict format
-    state_dict = {}
+    # ResidualPolicy fixes its normalized action range to [-1, 1]. Actor-only
+    # .pt merges omit these constant buffers; restore them for strict loading.
+    # A full source checkpoint can override them below.
+    state_dict = {
+        'action_scale': torch.tensor(1.0, dtype=torch.float32),
+        'action_bias': torch.tensor(0.0, dtype=torch.float32),
+    }
     
     # Convert LoRA layers
     for layer_name in ['fc1', 'fc2', 'fc3']:
@@ -268,6 +276,137 @@ def _save_checkpoint_safetensors(
     print(f"Saved metadata to {metadata_path}")
 
 
+def _validate_merge_params(params: Dict, label: str, model_metadata: Optional[Dict]) -> None:
+    """Validate tensor shapes without inferring observation or action semantics."""
+    def check_finite(value, name):
+        if isinstance(value, torch.Tensor) and not torch.isfinite(value).all():
+            raise ValueError(f"{label}: {name} contains non-finite parameters")
+        if isinstance(value, dict):
+            for key, child in value.items():
+                check_finite(child, f'{name}.{key}')
+        elif isinstance(value, (list, tuple)):
+            for index, child in enumerate(value):
+                check_finite(child, f'{name}[{index}]')
+
+    check_finite(params, 'params')
+    meta = dict(params.get('meta', {}))
+    for key, value in (model_metadata or {}).items():
+        if value is not None:
+            if key in meta and meta[key] != value:
+                raise ValueError(f"{label}: {key} metadata conflicts with the supplied value")
+            meta[key] = value
+    required = ('rank', 'obs_dim', 'action_dim', 'num_action_chunks', 'actor_input')
+    missing = [key for key in required if key not in meta]
+    if missing:
+        raise ValueError(
+            f"{label}: missing model metadata {missing}. Supply the checkpoint's "
+            "training dimensions and actor_input explicitly; tensor shapes alone "
+            "cannot establish observation/action semantics."
+        )
+    for key in required[:-1]:
+        value = meta[key]
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value <= 0:
+            raise ValueError(f"{label}: {key} must be a positive integer")
+    if meta['actor_input'] not in ('obs', 'obs_base_action'):
+        raise ValueError(f"{label}: invalid actor_input={meta['actor_input']!r}")
+
+    def tensor_at(mapping, key, shape=None):
+        tensor = mapping.get(key)
+        if not isinstance(tensor, torch.Tensor) or not tensor.is_floating_point():
+            raise ValueError(f"{label}: {key} must be a floating-point tensor")
+        if not torch.isfinite(tensor).all():
+            raise ValueError(f"{label}: {key} contains non-finite parameters")
+        if shape is not None and tuple(tensor.shape) != shape:
+            raise ValueError(f"{label}: {key} has shape {tuple(tensor.shape)}, expected {shape}")
+        return tensor
+
+    width = meta['obs_dim']
+    if meta['actor_input'] == 'obs_base_action':
+        width += meta['action_dim'] * meta['num_action_chunks']
+    for layer in ('fc1', 'fc2', 'fc3'):
+        values = params.get('lora_layers', {}).get(layer, {})
+        B = tensor_at(values, 'B')
+        if B.ndim != 2 or B.shape[1] != meta['rank'] or B.shape[0] <= 0:
+            raise ValueError(f"{label}: invalid {layer}.B rank/hidden dimensions")
+        tensor_at(values, 'A', (meta['rank'], width))
+        width = B.shape[0]
+        tensor_at(values, 'B_bias', (width,))
+    output_width = meta['action_dim'] * meta['num_action_chunks']
+    for head in ('fc_mean', 'fc_logstd'):
+        values = params.get('output_layers', {}).get(head, {})
+        tensor_at(values, 'weight', (output_width, width))
+        tensor_at(values, 'bias', (output_width,))
+    params['meta'] = meta
+
+
+def _prepare_merge_inputs(checkpoint_paths, task_weights, prune_ratio, model_metadata):
+    if not checkpoint_paths:
+        raise ValueError("At least one checkpoint is required")
+    if not math.isfinite(prune_ratio) or not 0 <= prune_ratio < 1:
+        raise ValueError("prune_ratio must be finite and in [0, 1)")
+    weights = list(task_weights) if task_weights is not None else [1.0] * len(checkpoint_paths)
+    if len(weights) != len(checkpoint_paths) or any(
+        not math.isfinite(weight) or weight < 0 for weight in weights
+    ):
+        raise ValueError("Provide one finite nonnegative weight per checkpoint")
+    total = sum(weights)
+    if not math.isfinite(total) or total <= 0:
+        raise ValueError("Task weights must have a finite positive sum")
+
+    all_params = []
+    for path in checkpoint_paths:
+        if os.path.isdir(path) or str(path).endswith('.safetensors'):
+            checkpoint = _load_checkpoint_safetensors(path)
+        else:
+            checkpoint = torch.load(path, map_location='cpu')
+        params = copy.deepcopy(_load_lora_params_from_checkpoint(checkpoint))
+        _validate_merge_params(params, str(path), model_metadata)
+        # Also reject invalid ancillary model buffers/critic parameters copied on save.
+        state_dict = checkpoint.get('state_dict', {})
+        if any(isinstance(value, torch.Tensor) and not torch.isfinite(value).all()
+               for value in state_dict.values()):
+            raise ValueError(f"{path}: state_dict contains non-finite parameters")
+        all_params.append(params)
+
+    first = all_params[0]
+    keys = ('rank', 'obs_dim', 'action_dim', 'num_action_chunks', 'actor_input')
+    reference_schema = tuple(first['meta'][key] for key in keys)
+    reference_shapes = tuple(tuple(first['lora_layers'][layer][key].shape)
+                             for layer in ('fc1', 'fc2', 'fc3') for key in ('A', 'B', 'B_bias'))
+    for path, params in zip(checkpoint_paths[1:], all_params[1:]):
+        schema = tuple(params['meta'][key] for key in keys)
+        shapes = tuple(tuple(params['lora_layers'][layer][key].shape)
+                       for layer in ('fc1', 'fc2', 'fc3') for key in ('A', 'B', 'B_bias'))
+        if schema != reference_schema or shapes != reference_shapes:
+            raise ValueError(f"{path}: incompatible rank/observation/action/chunks/actor_input/hidden dimensions")
+
+    # Zero-weight experts must not affect pruning, cross-task norms, or the
+    # reference checkpoint used for ancillary parameters.
+    active = [(path, params, weight / total) for path, params, weight in
+              zip(checkpoint_paths, all_params, weights) if weight > 0]
+    return ([item[0] for item in active], [item[1] for item in active],
+            [item[2] for item in active])
+
+
+def _save_merge_result(merged_params, output_path, task_weights, prune_ratio,
+                       merge_method, reference_checkpoint_path, restore_norm=None):
+    if output_path is None:
+        return
+    output_path = os.fspath(output_path)
+    if os.path.isdir(output_path) or not output_path.endswith('.pt'):
+        _save_checkpoint_safetensors(
+            merged_params, output_path, task_weights, len(task_weights), prune_ratio,
+            merge_method, reference_checkpoint_path,
+        )
+    else:
+        result = dict(merged_params=merged_params, task_weights=task_weights,
+                      n_tasks=len(task_weights), prune_ratio=prune_ratio,
+                      merge_method=merge_method)
+        if restore_norm is not None:
+            result['restore_norm'] = restore_norm
+        torch.save(result, output_path)
+
+
 class RobustMergeLoRA:
     """
     借鉴 RobustMerge 思想融合多个 LoRA Residual Actors
@@ -289,7 +428,8 @@ class RobustMergeLoRA:
         self, 
         checkpoint_paths: List[str], 
         task_weights: Optional[List[float]] = None,
-        output_path: Optional[str] = None
+        output_path: Optional[str] = None,
+        model_metadata: Optional[Dict] = None,
     ) -> Dict:
         """
         融合多个 LoRA Residual Actor
@@ -298,42 +438,23 @@ class RobustMergeLoRA:
             checkpoint_paths: List[str], 每个任务的checkpoint路径
             task_weights: Optional[List[float]], 每个任务的权重，默认均匀
             output_path: Optional[str], 保存融合结果的路径
+            model_metadata: Optional[Dict], explicit training dimensions/input semantics
         
         Returns:
             merged_params: Dict, 融合后的参数，格式与 LoRAResidualPolicy.get_lora_parameters() 一致
         """
+        checkpoint_paths, all_task_params, task_weights = _prepare_merge_inputs(
+            checkpoint_paths, task_weights, self.prune_ratio, model_metadata
+        )
         n_tasks = len(checkpoint_paths)
-        
-        # 默认均匀权重
-        if task_weights is None:
-            task_weights = [1.0 / n_tasks] * n_tasks
-        else:
-            # 归一化权重
-            total_weight = sum(task_weights)
-            task_weights = [w / total_weight for w in task_weights]
+        if n_tasks == 1:
+            merged_params = all_task_params[0]
+            _save_merge_result(merged_params, output_path, task_weights, self.prune_ratio,
+                               'robust_merge', checkpoint_paths[0])
+            return merged_params
         
         print(f"Merging {n_tasks} LoRA Residual Actors...")
         print(f"Task weights: {task_weights}")
-        
-        # 1. 加载所有任务的参数
-        all_task_params = []
-        for i, path in enumerate(checkpoint_paths):
-            print(f"Loading task {i} from {path}...")
-            
-            # Try to load as safetensors first, then fall back to torch.load
-            try:
-                if os.path.isdir(path) or (os.path.isfile(path) and path.endswith('.safetensors')):
-                    checkpoint = _load_checkpoint_safetensors(path)
-                else:
-                    checkpoint = torch.load(path, map_location='cpu')
-            except Exception as e:
-                # Fall back to torch.load if safetensors loading fails
-                print(f"  Warning: Failed to load as safetensors, trying torch.load: {e}")
-                checkpoint = torch.load(path, map_location='cpu')
-            
-            # Extract LoRA parameters from checkpoint
-            params = _load_lora_params_from_checkpoint(checkpoint)
-            all_task_params.append(params)
         
         # 2. 融合 LoRA 层（使用 RobustMerge）
         merged_lora_layers = {}
@@ -378,43 +499,13 @@ class RobustMergeLoRA:
             'output_layers': merged_output_layers,
             'meta': all_task_params[0]['meta']  # 元信息从第一个任务复制
         }
+        _validate_merge_params(merged_params, 'merged output', model_metadata)
         
-        # 5. 保存（如果指定了路径）
-        if output_path is not None:
-            # Check if output_path is a directory (for safetensors) or file (for .pt)
-            if os.path.isdir(output_path) or output_path.endswith('/') or (not os.path.exists(output_path) and not output_path.endswith('.pt')):
-                # Save as safetensors format
-                # Determine the actual directory path
-                if os.path.isdir(output_path):
-                    save_dir = output_path
-                elif output_path.endswith('/'):
-                    save_dir = output_path.rstrip('/')
-                else:
-                    # Create directory from output_path
-                    save_dir = output_path if os.path.dirname(output_path) else output_path
-                    os.makedirs(save_dir, exist_ok=True)
-                
-                _save_checkpoint_safetensors(
-                    merged_params=merged_params,
-                    output_path=save_dir,
-                    task_weights=task_weights,
-                    n_tasks=n_tasks,
-                    prune_ratio=self.prune_ratio,
-                    merge_method='robust_merge',
-                    reference_checkpoint_path=checkpoint_paths[0] if checkpoint_paths else None
-                )
-            else:
-                # Save as .pt format (backward compatibility)
-                save_dict = {
-                    'merged_params': merged_params,
-                    'task_weights': task_weights,
-                    'n_tasks': n_tasks,
-                    'prune_ratio': self.prune_ratio,
-                    'merge_method': 'robust_merge'
-                }
-                torch.save(save_dict, output_path)
-                print(f"Saved merged model to {output_path}")
-        
+        _save_merge_result(
+            merged_params, output_path, task_weights, self.prune_ratio,
+            'robust_merge', checkpoint_paths[0],
+        )
+
         return merged_params
     
     def _robust_merge_lora_layer(
@@ -474,7 +565,7 @@ class RobustMergeLoRA:
             norm_after_prune = torch.norm(W_after_prune, p='fro').item()
             
             # 1.2 互补缩放
-            S = self._compute_scaling_matrix(A_pruned, B)
+            S = self._compute_scaling_matrix(A, A_pruned)
             
             # 1.3 应用缩放
             B_scaled_task = B * S.unsqueeze(0)
@@ -484,8 +575,8 @@ class RobustMergeLoRA:
             norm_after_scaling = torch.norm(W_after_scaling, p='fro').item()
             
             print(f"    Task {i}:")
-            print(f"      After Pruning:   {norm_after_prune:.4f} ({norm_after_prune/norm_before_prune*100:.1f}% of original)")
-            print(f"      After Scaling:   {norm_after_scaling:.4f} ({norm_after_scaling/norm_before_prune*100:.1f}% of original)")
+            print(f"      After Pruning:   {norm_after_prune:.4f} ({norm_after_prune/max(norm_before_prune, 1e-8)*100:.1f}% of original)")
+            print(f"      After Scaling:   {norm_after_scaling:.4f} ({norm_after_scaling/max(norm_before_prune, 1e-8)*100:.1f}% of original)")
             print(f"      S matrix - min: {S.min().item():.4f}, max: {S.max().item():.4f}, mean: {S.mean().item():.4f}")
             
             A_scaled.append(A_pruned)
@@ -563,32 +654,15 @@ class RobustMergeLoRA:
         mask = (matrix.abs() >= threshold).float()
         return matrix * mask
     
-    def _compute_scaling_matrix(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
-        """
-        计算互补缩放矩阵 S（对角矩阵）
-        
-        公式：S^i = Σ|A[i,:]| / Σ|M_A[i,:] ⊙ A[i,:]|
-        其中 M_A 是 A 的掩码（非零为1）
-        
-        Args:
-            A: torch.Tensor, LoRA A 矩阵
-            B: torch.Tensor, LoRA B 矩阵
-        
-        Returns:
-            torch.Tensor, 缩放系数向量（对角矩阵的对角元素）
-        """
-        # 计算每行的绝对值和
-        A_abs = A.abs()
-        row_sums = A_abs.sum(dim=1)  # Σ|A[i,:]|
-        
-        # 计算掩码加权和
-        mask = (A != 0).float()
-        masked_sums = (mask * A_abs).sum(dim=1)  # Σ|M_A[i,:] ⊙ A[i,:]|
-        
-        # 计算缩放系数
-        S = row_sums / (masked_sums + 1e-8)
-        
-        return S
+    def _compute_scaling_matrix(self, original_A: torch.Tensor,
+                                pruned_A: torch.Tensor) -> torch.Tensor:
+        """Restore each retained row's absolute mass using its pre-pruning value."""
+        original_sums = original_A.abs().sum(dim=1)
+        retained_sums = pruned_A.abs().sum(dim=1)
+        # A fully pruned row has no contribution to restore; keep its B column unchanged.
+        return torch.where(retained_sums > 0,
+                           original_sums / retained_sums.clamp_min(1e-8),
+                           torch.ones_like(retained_sums))
 
 
 class RobustMergeLoRAOptimized:
@@ -613,7 +687,8 @@ class RobustMergeLoRAOptimized:
         self, 
         checkpoint_paths: List[str], 
         task_weights: Optional[List[float]] = None,
-        output_path: Optional[str] = None
+        output_path: Optional[str] = None,
+        model_metadata: Optional[Dict] = None,
     ) -> Dict:
         """
         融合多个 LoRA Residual Actor（优化版本）
@@ -622,19 +697,20 @@ class RobustMergeLoRAOptimized:
             checkpoint_paths: List[str], 每个任务的checkpoint路径
             task_weights: Optional[List[float]], 每个任务的权重，默认均匀
             output_path: Optional[str], 保存融合结果的路径
+            model_metadata: Optional[Dict], explicit training dimensions/input semantics
         
         Returns:
             merged_params: Dict, 融合后的参数
         """
+        checkpoint_paths, all_task_params, task_weights = _prepare_merge_inputs(
+            checkpoint_paths, task_weights, self.prune_ratio, model_metadata
+        )
         n_tasks = len(checkpoint_paths)
-        
-        # 默认均匀权重
-        if task_weights is None:
-            task_weights = [1.0 / n_tasks] * n_tasks
-        else:
-            # 归一化权重
-            total_weight = sum(task_weights)
-            task_weights = [w / total_weight for w in task_weights]
+        if n_tasks == 1:
+            merged_params = all_task_params[0]
+            _save_merge_result(merged_params, output_path, task_weights, self.prune_ratio,
+                               'robust_merge_optimized', checkpoint_paths[0], self.restore_norm)
+            return merged_params
         
         print(f"Merging {n_tasks} LoRA Residual Actors (Optimized Version)...")
         print(f"Task weights: {task_weights}")
@@ -642,26 +718,6 @@ class RobustMergeLoRAOptimized:
             print(f"Norm restoration: ENABLED")
         else:
             print(f"Norm restoration: DISABLED")
-        
-        # 1. 加载所有任务的参数
-        all_task_params = []
-        for i, path in enumerate(checkpoint_paths):
-            print(f"Loading task {i} from {path}...")
-            
-            # Try to load as safetensors first, then fall back to torch.load
-            try:
-                if os.path.isdir(path) or (os.path.isfile(path) and path.endswith('.safetensors')):
-                    checkpoint = _load_checkpoint_safetensors(path)
-                else:
-                    checkpoint = torch.load(path, map_location='cpu')
-            except Exception as e:
-                # Fall back to torch.load if safetensors loading fails
-                print(f"  Warning: Failed to load as safetensors, trying torch.load: {e}")
-                checkpoint = torch.load(path, map_location='cpu')
-            
-            # Extract LoRA parameters from checkpoint
-            params = _load_lora_params_from_checkpoint(checkpoint)
-            all_task_params.append(params)
         
         # 2. 融合 LoRA 层（使用优化版RobustMerge）
         merged_lora_layers = {}
@@ -719,44 +775,13 @@ class RobustMergeLoRAOptimized:
             'output_layers': merged_output_layers,
             'meta': all_task_params[0]['meta']  # 元信息从第一个任务复制
         }
+        _validate_merge_params(merged_params, 'merged output', model_metadata)
         
-        # 5. 保存（如果指定了路径）
-        if output_path is not None:
-            # Check if output_path is a directory (for safetensors) or file (for .pt)
-            if os.path.isdir(output_path) or output_path.endswith('/') or (not os.path.exists(output_path) and not output_path.endswith('.pt')):
-                # Save as safetensors format
-                # Determine the actual directory path
-                if os.path.isdir(output_path):
-                    save_dir = output_path
-                elif output_path.endswith('/'):
-                    save_dir = output_path.rstrip('/')
-                else:
-                    # Create directory from output_path
-                    save_dir = output_path if os.path.dirname(output_path) else output_path
-                    os.makedirs(save_dir, exist_ok=True)
-                
-                _save_checkpoint_safetensors(
-                    merged_params=merged_params,
-                    output_path=save_dir,
-                    task_weights=task_weights,
-                    n_tasks=n_tasks,
-                    prune_ratio=self.prune_ratio,
-                    merge_method='robust_merge_optimized',
-                    reference_checkpoint_path=checkpoint_paths[0] if checkpoint_paths else None
-                )
-            else:
-                # Save as .pt format (backward compatibility)
-                save_dict = {
-                    'merged_params': merged_params,
-                    'task_weights': task_weights,
-                    'n_tasks': n_tasks,
-                    'prune_ratio': self.prune_ratio,
-                    'restore_norm': self.restore_norm,
-                    'merge_method': 'robust_merge_optimized'
-                }
-                torch.save(save_dict, output_path)
-                print(f"Saved merged model to {output_path}")
-        
+        _save_merge_result(
+            merged_params, output_path, task_weights, self.prune_ratio,
+            'robust_merge_optimized', checkpoint_paths[0], self.restore_norm,
+        )
+
         return merged_params
     
     def _robust_merge_lora_layer_optimized(
@@ -805,7 +830,7 @@ class RobustMergeLoRAOptimized:
             norm_after_prune = torch.norm(W_after_prune, p='fro').item()
             
             # 1.2 互补缩放
-            S = self._compute_scaling_matrix(A_pruned, B)
+            S = self._compute_scaling_matrix(A, A_pruned)
             
             # 1.3 应用缩放
             B_scaled_task = B * S.unsqueeze(0)
@@ -815,8 +840,8 @@ class RobustMergeLoRAOptimized:
             norm_after_scaling = torch.norm(W_after_scaling, p='fro').item()
             
             print(f"    Task {i}:")
-            print(f"      After Pruning:   {norm_after_prune:.4f} ({norm_after_prune/norm_before_prune*100:.1f}% of original)")
-            print(f"      After Scaling:   {norm_after_scaling:.4f} ({norm_after_scaling/norm_before_prune*100:.1f}% of original)")
+            print(f"      After Pruning:   {norm_after_prune:.4f} ({norm_after_prune/max(norm_before_prune, 1e-8)*100:.1f}% of original)")
+            print(f"      After Scaling:   {norm_after_scaling:.4f} ({norm_after_scaling/max(norm_before_prune, 1e-8)*100:.1f}% of original)")
             print(f"      S matrix - min: {S.min().item():.4f}, max: {S.max().item():.4f}, mean: {S.mean().item():.4f}")
             
             A_scaled.append(A_pruned)
@@ -902,18 +927,13 @@ class RobustMergeLoRAOptimized:
         mask = (matrix.abs() >= threshold).float()
         return matrix * mask
     
-    def _compute_scaling_matrix(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
-        """计算互补缩放矩阵 S（对角矩阵）"""
-        # 计算每行的绝对值和
-        A_abs = A.abs()
-        row_sums = A_abs.sum(dim=1)  # Σ|A[i,:]|
-        
-        # 计算掩码加权和
-        mask = (A != 0).float()
-        masked_sums = (mask * A_abs).sum(dim=1)  # Σ|M_A[i,:] ⊙ A[i,:]|
-        
-        # 计算缩放系数
-        S = row_sums / (masked_sums + 1e-8)
-        
-        return S
+    def _compute_scaling_matrix(self, original_A: torch.Tensor,
+                                pruned_A: torch.Tensor) -> torch.Tensor:
+        """Restore each retained row's absolute mass using its pre-pruning value."""
+        original_sums = original_A.abs().sum(dim=1)
+        retained_sums = pruned_A.abs().sum(dim=1)
+        # A fully pruned row has no contribution to restore; keep its B column unchanged.
+        return torch.where(retained_sums > 0,
+                           original_sums / retained_sums.clamp_min(1e-8),
+                           torch.ones_like(retained_sums))
 

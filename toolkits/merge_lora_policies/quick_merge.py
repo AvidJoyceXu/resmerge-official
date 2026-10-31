@@ -25,7 +25,8 @@ Usage:
         --checkpoint_paths path/to/task0 path/to/task1 \
         --output_path merged_policy_dir/ \
         --prune_ratio 0.2 \
-        --restore_norm
+        --restore_norm \
+        --obs_dim 88 --action_dim 7 --num_action_chunks 8 --actor_input obs
     
     # PyTorch .pt format (backward compatibility)
     python toolkits/merge_lora_policies/quick_merge.py \
@@ -36,6 +37,8 @@ Usage:
 
 Note: If output_path is a directory or doesn't end with .pt, saves as safetensors format
       (model-00001-of-00001.safetensors). If output_path ends with .pt, saves as .pt format.
+      Dimension/input flags must match the checkpoints' training configuration;
+      omit them only when every checkpoint already carries complete model metadata.
 """
 
 import torch
@@ -97,6 +100,17 @@ def main():
         action='store_true',
         help='Use optimized version with norm restoration (recommended)'
     )
+    for option in ('obs_dim', 'action_dim', 'num_action_chunks'):
+        parser.add_argument(
+            f'--{option}', type=int,
+            help=f'Training {option}; required when absent from checkpoint metadata. '
+                 'Must describe every input checkpoint.',
+        )
+    parser.add_argument(
+        '--actor_input', choices=['obs', 'obs_base_action'],
+        help='Training input semantics; required when absent from checkpoint metadata. '
+             'Must describe every input checkpoint.',
+    )
     
     args = parser.parse_args()
     
@@ -134,7 +148,10 @@ def main():
     merged_params = merger.merge_actors(
         checkpoint_paths=args.checkpoint_paths,
         task_weights=args.task_weights,
-        output_path=args.output_path
+        output_path=args.output_path,
+        model_metadata={key: getattr(args, key) for key in
+                        ('obs_dim', 'action_dim', 'num_action_chunks', 'actor_input')
+                        if getattr(args, key) is not None},
     )
     
     print(f"\n✅ Merge completed!")

@@ -36,7 +36,7 @@
 ################################################################################
 
 # 设置错误处理：遇到错误立即退出
-set -e
+set -euo pipefail
 
 # ============================================================================
 # 环境变量设置
@@ -45,14 +45,14 @@ set -e
 # 获取脚本所在目录的绝对路径
 export EMBODIED_PATH="$( cd "$(dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # 获取仓库根目录（embodiment目录的父目录的父目录）
-export REPO_PATH=$(dirname $(dirname "$EMBODIED_PATH"))
+export REPO_PATH="$(dirname "$(dirname "$EMBODIED_PATH")")"
 # 评估脚本路径
 export SRC_FILE="${EMBODIED_PATH}/eval_embodied_agent.py"
 
 # MuJoCo渲染设置（使用osmesa进行无头渲染）
 export MUJOCO_GL="osmesa"
 export PYOPENGL_PLATFORM="osmesa"
-export PYTHONPATH=${REPO_PATH}:$PYTHONPATH
+export PYTHONPATH="${REPO_PATH}${PYTHONPATH:+:$PYTHONPATH}"
 
 # CUDA和Hydra设置
 export CUDA_LAUNCH_BLOCKING=1
@@ -97,6 +97,7 @@ fi
 # 获取参数
 POLICY_PATH="${2}"
 TASK_ID="${3}"
+shift 3
 
 # 验证task_id是否为有效数字
 if ! [[ "$TASK_ID" =~ ^[0-9]+$ ]]; then
@@ -170,16 +171,18 @@ echo ""
 # 2. env.eval.specific_reset_id: 设置为指定的task ID
 # 3. runner.only_eval: 设置为True，只进行评估不训练
 # 4. runner.logger.log_path: 设置为当前测试的日志目录
-CMD="python ${SRC_FILE} \
-    --config-path ${EMBODIED_PATH}/config/ \
-    --config-name ${BASE_CONFIG_NAME} \
-    runner.eval_policy_path=\"${POLICY_PATH}\" \
-    env.eval.specific_reset_id=${TASK_ID} \
-    runner.only_eval=True \
-    runner.logger.log_path=${RESULTS_DIR}"
+CMD=(python "$SRC_FILE"
+    --config-path "${EMBODIED_PATH}/config/"
+    --config-name "$BASE_CONFIG_NAME"
+    "runner.eval_policy_path=\"${POLICY_PATH}\""
+    "env.eval.specific_reset_id=${TASK_ID}"
+    runner.only_eval=True
+    "runner.logger.log_path=${RESULTS_DIR}" "$@")
 
 echo "执行命令:"
-echo "  ${CMD}"
+printf '  '
+printf '%q ' "${CMD[@]}"
+printf '\n'
 echo ""
 
 # ====================================================================
@@ -189,7 +192,7 @@ LOG_FILE="${RESULTS_DIR}/eval.log"
 
 # 运行评估命令，将输出保存到日志文件
 echo "正在运行评估..."
-if ${CMD} > "${LOG_FILE}" 2>&1; then
+if "${CMD[@]}" > "${LOG_FILE}" 2>&1; then
     echo "✓ 评估成功完成"
     
     # 尝试从日志文件中提取成功率（根据实际日志格式调整）

@@ -1,3 +1,4 @@
+# Modified by the ResMerge contributors, 2026-10-31; see real_robot/THIRD_PARTY.md.
 """LeapHand 22D action scaling: arm 0-5 unchanged, hand 6-21 in [-1,1] for training."""
 
 from __future__ import annotations
@@ -126,5 +127,12 @@ class LeapHandNormalizedActionWrapper(gym.ActionWrapper):
         """
         act = self.action(action)
         if action_base is None:
-            return self.env.step(act)
-        return self.env.step(act, action_base)
+            obs, reward, terminated, truncated, info = self.env.step(act)
+        else:
+            obs, reward, terminated, truncated, info = self.env.step(act, action_base)
+        if "intervene_action" in info:
+            # Inner wrappers report physical hand commands; expose the same
+            # normalized coordinates as this wrapper's action space and replay.
+            info = dict(info)
+            info["intervene_action"] = normalize_action_22d(info["intervene_action"])
+        return obs, reward, terminated, truncated, info

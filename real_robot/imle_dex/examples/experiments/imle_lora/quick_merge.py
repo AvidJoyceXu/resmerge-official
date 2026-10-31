@@ -10,7 +10,7 @@ import torch
 
 from merge_lora_actors import (
     RobustMergeLoRA, RobustMergeLoRAOptimized, DirectionalInterpolationMergeLoRA,
-    get_actor_params,
+    get_actor_params, prepare_merge_inputs,
 )
 
 
@@ -47,7 +47,7 @@ def validate_export(checkpoint, path):
 
 def merge_exports(checkpoint_paths, output_path, task_weights=None, prune_ratio=0.2,
                   method='robust', overwrite=False):
-    """Merge task actors and bundle their weighted LayerNorm parameters."""
+    """Merge contributing actors and bundle LayerNorm; zero-weight inputs are ignored."""
     paths = [Path(p).expanduser().resolve() for p in checkpoint_paths]
     output = Path(output_path).expanduser().resolve()
     if len(paths) < 2:
@@ -58,10 +58,7 @@ def merge_exports(checkpoint_paths, output_path, task_weights=None, prune_ratio=
         raise FileExistsError(f'{output} exists; use --overwrite to replace it')
     if not math.isfinite(prune_ratio) or not 0 <= prune_ratio < 1:
         raise ValueError('prune_ratio must be in [0,1)')
-    weights = list(task_weights) if task_weights is not None else [1.0] * len(paths)
-    if len(weights) != len(paths) or any(not math.isfinite(w) or w < 0 for w in weights) or sum(weights) <= 0:
-        raise ValueError('Provide one finite nonnegative weight per task, with a positive sum')
-    weights = [w / sum(weights) for w in weights]
+    paths, weights = prepare_merge_inputs(paths, task_weights)
     checkpoints = [torch.load(p, map_location='cpu', weights_only=False) for p in paths]
     schemas = [validate_export(c, p) for c, p in zip(checkpoints, paths)]
     if any(schema != schemas[0] for schema in schemas[1:]):

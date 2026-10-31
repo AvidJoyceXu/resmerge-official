@@ -1,10 +1,14 @@
-# ResMerge: Real-Robot Reinforcement Learning
+# 🦾 ResMerge on Real Robots
+
+[📄 Paper](https://openreview.net/forum?id=wLtzr7PNBI) · [🌐 Project](https://resmerge.github.io/) · [🏠 Main README](../README.md) · [🔧 Hardware](HARDWARE.md)
 
 Real-robot code for ResMerge with a Franka arm and a 16-DoF LEAP right hand. This repository provides IMLE pretraining, task-specific LoRA residual SAC training, residual-field merge analysis, multi-task actor merging and real-robot evaluation. `pick_place` is the supplied task-environment example.
 
 **Workflow:** PICO hand tracking + SpaceMouse arm teleoperation → successful demonstrations → Zarr dataset → shared IMLE base policy → task-specific LoRA residual RL → merge-feasibility analysis → actor merge → evaluation on each task.
 
 The IMLE base policy remains frozen during RL. Label episode success or failure using the keyboard. Collect demonstrations and train checkpoints using the steps below.
+
+**Start here:** [Hardware](#1-prepare-the-hardware) → [Installation](#2-install-the-python-environment) → [Demonstrations](#3-teleoperate-and-collect-demonstrations) → [Pretraining](#4-convert-data-and-pretrain-imle) → [Residual RL](#6-run-lora-residual-rl) → [RFC](#8-analyze-whether-task-residuals-are-compatible) → [Merge](#9-merge-the-task-actors) → [Evaluate](#10-evaluate-the-merged-policy-on-every-task).
 
 ## Repository layout
 
@@ -59,15 +63,16 @@ From the official repository's root:
 ```bash
 cd real_robot
 bash install.sh
-source .resmerge-venv/bin/activate
-export REPO_ROOT="$PWD"
-export PYTHONPATH="$REPO_ROOT/imle_dex/examples:$REPO_ROOT/imle_dex/precise_dex:$REPO_ROOT/teleop:${PYTHONPATH:-}"
 cp hardware.example.env hardware.local.env
 ```
 
-Edit `hardware.local.env`, then load it in each runtime terminal:
+Edit `hardware.local.env`. In **each ResMerge runtime terminal**, activate the environment and load the same hardware settings (replace the path below with your checkout):
 
 ```bash
+cd /path/to/resmerge-official/real_robot
+source .resmerge-venv/bin/activate
+export REPO_ROOT="$PWD"
+export PYTHONPATH="$REPO_ROOT/imle_dex/examples:$REPO_ROOT/imle_dex/precise_dex:$REPO_ROOT/teleop:${PYTHONPATH:-}"
 set -a
 source "$REPO_ROOT/hardware.local.env"
 set +a
@@ -79,9 +84,13 @@ The installer installs Python dependencies from `requirements/` and the local pa
 
 ## 3. Teleoperate and collect demonstrations
 
-In a terminal using your configured **ROS environment**, load the hardware configuration and start the Franka service:
+In a separate terminal using your configured **ROS environment**, load the hardware configuration and start the Franka service:
 
 ```bash
+cd /path/to/resmerge-official/real_robot
+set -a
+source hardware.local.env
+set +a
 bash start_franka_server.sh
 ```
 
@@ -171,9 +180,9 @@ HIL=1 bash imle_dex/examples/experiments/imle_lora/run_actor_res_sac_imle_lora.s
 
 `HIL=1` enables SpaceMouse arm intervention and stores the executed intervention action in replay. Use `HIL=0` for policy control with keyboard labels only. After reset, press `r` to start or `t` to reset again; space ends an episode successfully and `f` ends it as failure.
 
-The learner waits for sufficient online replay, then mixes online and demonstration samples 50/50 when `--demo_paths` is supplied. `--debug` disables W&B; use your own external credentials/entity for online logging. Actor `max_steps` counts environment interactions; learner `max_steps` counts gradient updates.
+The learner starts when combined online/demo replay reaches `training_starts`. With `--demo_paths`, it uses demonstration-only batches until online samples arrive, then mixes online and demonstration samples 50/50. `--debug` disables W&B; use your own external credentials/entity for online logging. Actor `max_steps` counts environment interactions; learner `max_steps` counts gradient updates.
 
-The launchers agree on observation stack 2, action horizon 16, chunk execution 4, latency 0 and residual scale 0.05. Keep these settings, LoRA rank and the base checkpoint consistent. For separate actor/learner machines, configure reachable addresses and networking. To resume, set `RESUME_RUN` to the previous run directory containing its checkpoints and replay snapshot.
+The launchers agree on observation stack 2, action horizon 16, chunk execution 4, latency 0 and residual scale 0.05. The default residual actor has three 256-unit hidden layers. Keep these settings, LoRA rank and the base checkpoint consistent. For separate actor/learner machines, configure reachable addresses and networking. To resume, set `RESUME_RUN` to the previous run directory containing its checkpoints and replay snapshot.
 
 ## 7. Train task-specific residuals and export their actors
 
@@ -244,9 +253,11 @@ python "$LORA_DIR/quick_merge.py" \
   --output_path "$MERGED_PT"
 ```
 
-Supply two or more single-task exports or previously merged actors. Omit `--task_weights` for uniform weights over the **input experts**; a consolidated expert counts as one input. For example, weights `0.5 0.5` for `(AB, C)` weight expert AB and expert C equally, rather than weighting all three original tasks equally. Run the compatibility analysis in step 8 first. The merge entry point also checks parameter shapes, rank, finite values and available base-policy/residual-scale metadata. Existing output requires `--overwrite`.
+Supply two or more single-task exports or previously merged actors. Omit `--task_weights` for uniform weights over the **input experts**; a consolidated expert counts as one input. For example, weights `0.5 0.5` for `(AB, C)` weight expert AB and expert C equally, rather than weighting all three original tasks equally. Weights must be finite and nonnegative, with at least one positive value. Zero-weight inputs are excluded; a single contributing expert is preserved without pruning or rescaling. Run the compatibility analysis in step 8 first. The merge entry point also checks parameter shapes, rank, finite values and available base-policy/residual-scale metadata. Existing output requires `--overwrite`.
 
-Select alternative methods with `--method optimized` or `--method directional`. Performance-aware and hierarchical merging are available as Python APIs in `merge_lora_actors.py`.
+The robust operator prunes low-magnitude entries of each source's A matrices, compensates their retained row mass through B, normalizes `BA` Frobenius norms and averages factors, biases, output heads and LayerNorm parameters. The optimized variant additionally restores weighted source norms after averaging.
+
+Select alternative methods with `--method optimized` or `--method directional`.
 
 The output contains the merged actor and LayerNorm parameters, shared base/scale metadata when available for all inputs, and original-export lineage. Pass this file directly to evaluation or the next RFC analysis and merge.
 

@@ -259,7 +259,7 @@ flags.DEFINE_enum(
 flags.DEFINE_bool(
     "sac_imle_feat_concat_action_base",
     False,
-    "Concatenate the current IMLE base action to pre-projection features; must match checkpoint dimensions.",
+    "Unsupported: leave disabled to use the maintained IMLE pre-projection feature layout.",
 )
 flags.DEFINE_enum(
     "sac_pixel_backend",
@@ -880,12 +880,11 @@ def _next_imle_action_base_np(
     n_obs_steps: int,
     stack_obs_num: int,
     latency_step: int,
-    read_leap_hw: Callable[[], Optional[np.ndarray]],
     current_chunk_len: int,
 ) -> tuple[np.ndarray, Optional[torch.Tensor]]:
     """
     Return (next_action_base, cached_pred_t), reusing look-ahead predictions across chunk
-    boundaries.
+    boundaries. leap_hist already contains the post-step hand sample for next_obs.
     """
     if (j + 1 < int(current_chunk_len)) and (j + 1 < pred_t.shape[1]):
         return (
@@ -898,19 +897,13 @@ def _next_imle_action_base_np(
             .reshape(-1),
             None,
         )
-    lh: deque[np.ndarray] = deque(list(leap_hist), maxlen=int(stack_obs_num))
-    lp = read_leap_hw()
-    if lp is None:
-        lp = lh[-1] if lh else np.zeros(16, dtype=np.float32)
-    lp = np.asarray(lp, dtype=np.float32).reshape(16)
-    lh.append(lp)
     obs_t = fle.build_policy_obs(
         next_obs,
         rgb_keys=rgb_keys,
         image_hw=image_hw,
         n_obs_steps=n_obs_steps,
         stack_obs_num=int(stack_obs_num),
-        leap_hist=lh,
+        leap_hist=leap_hist,
     )
     obs_t = {k: v.to(device, non_blocking=True) for k, v in obs_t.items()}
     with torch.no_grad():
@@ -1044,12 +1037,6 @@ def actor(agent: Optional[SACAgent], data_store, env, sampling_rng):
         timer.tick("total")
 
         if steps_into_chunk >= current_chunk_len:
-            lp = read_leap_hw()
-            if lp is None:
-                lp = leap_hist[-1] if leap_hist else np.zeros(16, dtype=np.float32)
-            lp = np.asarray(lp, dtype=np.float32).reshape(16)
-            leap_hist.append(lp)
-
             if cached_pred_t is not None:
                 pred_t = cached_pred_t
                 cached_pred_t = None
@@ -1095,11 +1082,6 @@ def actor(agent: Optional[SACAgent], data_store, env, sampling_rng):
 
         assert pred_t is not None
         j = steps_into_chunk
-        if j > 0:
-            lp = read_leap_hw()
-            if lp is None:
-                lp = leap_hist[-1] if leap_hist else np.zeros(16, dtype=np.float32)
-            leap_hist.append(np.asarray(lp, dtype=np.float32).reshape(16))
 
         base_t = pred_t[0, j].reshape(-1).to(device=device, dtype=torch.float32)
 
@@ -1155,6 +1137,12 @@ def actor(agent: Optional[SACAgent], data_store, env, sampling_rng):
                             f"[diag][step={step}] residual=off but |final-base|_inf={_delta:.3e}"
                         )
             next_obs, reward, done, truncated, info = env.step(final, base_np)
+            # Advance exactly once per environment step, before both residual
+            # feature extraction and IMLE look-ahead. Chunk boundaries reuse it.
+            lp = read_leap_hw()
+            if lp is None:
+                lp = leap_hist[-1] if leap_hist else np.zeros(16, dtype=np.float32)
+            leap_hist.append(np.asarray(lp, dtype=np.float32).reshape(16).copy())
             reward = np.asarray(reward, dtype=np.float32)
             rw = float(np.asarray(reward, dtype=np.float64).reshape(-1)[0])
             term = bool(done or truncated)
@@ -1197,7 +1185,6 @@ def actor(agent: Optional[SACAgent], data_store, env, sampling_rng):
                 n_obs_steps=n_obs_steps,
                 stack_obs_num=stack_obs_num,
                 latency_step=latency_step,
-                read_leap_hw=read_leap_hw,
                 current_chunk_len=current_chunk_len,
             )
             if cached_pred_next is not None:
@@ -1648,6 +1635,11 @@ def main(argv):
         raise SystemExit("Specify exactly one of --learner or --actor")
     if FLAGS.eval_merged_pt and not (FLAGS.actor and FLAGS.eval_only):
         raise SystemExit("--eval_merged_pt requires --actor and --eval_only")
+    if FLAGS.sac_imle_feat_concat_action_base:
+        raise SystemExit(
+            "Base-action feature concatenation is not supported; "
+            "leave --sac_imle_feat_concat_action_base disabled."
+        )
 
     devices = jax.local_devices()
     sharding = jax.sharding.PositionalSharding(devices)

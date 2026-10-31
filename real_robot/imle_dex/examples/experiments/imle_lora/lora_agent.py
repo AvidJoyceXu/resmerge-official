@@ -428,8 +428,10 @@ def load_merged_for_actor(
     weights_for_ln: Optional[List[float]] = None,
 ):
     """
-    Load exported/merged actor tensors into a compatible agent. Restore LayerNorm from embedded
-    _jax_extras or a weighted average of source exports; source weights default to uniform.
+    Load exported/merged actor tensors into a compatible agent. Embedded _jax_extras are
+    authoritative unless explicit weights_for_ln request a source-based override. Legacy
+    exports can recover LayerNorm from source exports, with verified source order for saved
+    nonuniform weights. Validate all tensors before replacing actor parameters.
     Return an agent with replaced parameters. Use quick_merge.py for multi-task merging.
     """
     import torch
@@ -454,20 +456,24 @@ def load_merged_for_actor(
         )
 
     
-    if source_pt_paths_for_ln is None:
-        if "_jax_extras" in merged:
-            ln_extras = merged["_jax_extras"]
-        else:
-            raise ValueError(
-                "merged_pt has no _jax_extras LayerNorm parameters; "
-                "provide source_pt_paths_for_ln=[task_X.pt, task_Y.pt, ...] explicitly"
-            )
+    if "_jax_extras" in merged and weights_for_ln is None:
+        ln_extras = merged["_jax_extras"]
     else:
-        ln_extras = _average_ln_from_sources(source_pt_paths_for_ln, weights_for_ln)
+        if not source_pt_paths_for_ln:
+            raise ValueError(
+                "Source-based LayerNorm recovery requires source_pt_paths_for_ln. "
+                "Prefer a self-contained export made with quick_merge.py."
+            )
+        weights = _legacy_ln_weights(merged, source_pt_paths_for_ln, weights_for_ln)
+        ln_extras = _average_ln_from_sources(source_pt_paths_for_ln, weights)
 
     
     def t2j(t, transpose=False):
+        if not torch.is_tensor(t) or not torch.is_floating_point(t):
+            raise ValueError(f"{merged_pt_path}: actor and LayerNorm parameters must be floating tensors")
         arr = t.detach().cpu().numpy().astype(np.float32, copy=False)
+        if not np.isfinite(arr).all():
+            raise ValueError(f"{merged_pt_path}: actor or LayerNorm parameters contain nonfinite values")
         if transpose:
             arr = arr.T
         return jnp.asarray(np.ascontiguousarray(arr))
@@ -495,34 +501,59 @@ def load_merged_for_actor(
     trunk_LN1_bias = t2j(ln_extras["trunk_LN_1"]["bias"])
 
     
-    params = agent.state.params
-    is_frozen = hasattr(params, "unfreeze")
-    if is_frozen:
-        params = flax.core.unfreeze(params)
+    is_frozen = hasattr(agent.state.params, "unfreeze")
+    # unfreeze also recursively copies plain dictionaries; a failed load must not mutate the
+    # existing agent or leave it with a partially replaced actor.
+    params = flax.core.unfreeze(agent.state.params)
 
     actor_key = "modules_actor" if "modules_actor" in params else "actor"
     actor = params[actor_key]
-    actor["encoder"]["enc_lora_A"]["kernel"] = enc_A
-    actor["encoder"]["enc_lora_B"]["kernel"] = enc_B
-    actor["encoder"]["enc_lora_B"]["bias"] = enc_B_bias
-    actor["encoder"]["LayerNorm_0"]["scale"] = enc_LN_scale
-    actor["encoder"]["LayerNorm_0"]["bias"] = enc_LN_bias
-
-    actor["network"]["lora_0_A"]["kernel"] = fc2_A
-    actor["network"]["lora_0_B"]["kernel"] = fc2_B
-    actor["network"]["lora_0_B"]["bias"] = fc2_B_bias
-    actor["network"]["lora_1_A"]["kernel"] = fc3_A
-    actor["network"]["lora_1_B"]["kernel"] = fc3_B
-    actor["network"]["lora_1_B"]["bias"] = fc3_B_bias
-    actor["network"]["LayerNorm_0"]["scale"] = trunk_LN0_scale
-    actor["network"]["LayerNorm_0"]["bias"] = trunk_LN0_bias
-    actor["network"]["LayerNorm_1"]["scale"] = trunk_LN1_scale
-    actor["network"]["LayerNorm_1"]["bias"] = trunk_LN1_bias
-
-    actor["Dense_0"]["kernel"] = mean_w
-    actor["Dense_0"]["bias"] = mean_b
-    actor["Dense_1"]["kernel"] = logstd_w
-    actor["Dense_1"]["bias"] = logstd_b
+    expected_meta = {
+        "rank": actor["encoder"]["enc_lora_A"]["kernel"].shape[1],
+        "obs_dim": actor["encoder"]["enc_lora_A"]["kernel"].shape[0],
+        "action_dim": actor["Dense_0"]["bias"].shape[0],
+    }
+    for key, expected in expected_meta.items():
+        if int(m_params["meta"][key]) != expected:
+            raise ValueError(
+                f"{merged_pt_path}: actor {key}={m_params['meta'][key]} does not match "
+                f"the configured agent ({expected}); use matching rank/observation/action settings"
+            )
+    updates = [
+        (("encoder", "enc_lora_A", "kernel"), enc_A),
+        (("encoder", "enc_lora_B", "kernel"), enc_B),
+        (("encoder", "enc_lora_B", "bias"), enc_B_bias),
+        (("encoder", "LayerNorm_0", "scale"), enc_LN_scale),
+        (("encoder", "LayerNorm_0", "bias"), enc_LN_bias),
+        (("network", "lora_0_A", "kernel"), fc2_A),
+        (("network", "lora_0_B", "kernel"), fc2_B),
+        (("network", "lora_0_B", "bias"), fc2_B_bias),
+        (("network", "lora_1_A", "kernel"), fc3_A),
+        (("network", "lora_1_B", "kernel"), fc3_B),
+        (("network", "lora_1_B", "bias"), fc3_B_bias),
+        (("network", "LayerNorm_0", "scale"), trunk_LN0_scale),
+        (("network", "LayerNorm_0", "bias"), trunk_LN0_bias),
+        (("network", "LayerNorm_1", "scale"), trunk_LN1_scale),
+        (("network", "LayerNorm_1", "bias"), trunk_LN1_bias),
+        (("Dense_0", "kernel"), mean_w),
+        (("Dense_0", "bias"), mean_b),
+        (("Dense_1", "kernel"), logstd_w),
+        (("Dense_1", "bias"), logstd_b),
+    ]
+    for path, value in updates:
+        current = actor
+        for key in path:
+            current = current[key]
+        if value.shape != current.shape:
+            raise ValueError(
+                f"{merged_pt_path}: {'.'.join(path)} has shape {value.shape}; "
+                f"the configured actor requires {current.shape}"
+            )
+    for path, value in updates:
+        target = actor
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
 
     params[actor_key] = actor
     if is_frozen:
@@ -532,6 +563,40 @@ def load_merged_for_actor(
     return agent.replace(state=new_state)
 
 
+def _normalized_ln_weights(source_pt_paths, weights):
+    if not source_pt_paths:
+        raise ValueError("Provide at least one LayerNorm source export")
+    values = np.asarray(weights if weights is not None else [1.0] * len(source_pt_paths),
+                        dtype=np.float64)
+    if (values.shape != (len(source_pt_paths),) or not np.isfinite(values).all()
+            or np.any(values < 0) or not np.any(values > 0)):
+        raise ValueError("Provide one finite nonnegative LayerNorm weight per source, with a positive sum")
+    values = values / values.max()
+    return (values / values.sum()).tolist()
+
+
+def _legacy_ln_weights(merged, source_pt_paths, explicit_weights):
+    if explicit_weights is not None:
+        return _normalized_ln_weights(source_pt_paths, explicit_weights)
+    saved_weights = merged.get("task_weights")
+    if saved_weights is None:
+        return None
+    weights = _normalized_ln_weights(source_pt_paths, saved_weights)
+    if all(weight == weights[0] for weight in weights):
+        return weights  # Uniform averaging is independent of source order.
+    saved_sources = merged.get("source_checkpoints")
+    canonical = lambda paths: [os.path.realpath(os.path.expanduser(str(path))) for path in paths]
+    if saved_sources is None or canonical(source_pt_paths) != canonical(saved_sources):
+        raise ValueError(
+            "Cannot verify source order for this legacy merge's nonuniform task_weights. "
+            "Supply sources in the recorded source_checkpoints order and at those paths, or "
+            "recreate a self-contained export with quick_merge.py --checkpoint_paths "
+            "ORIGINAL_TASK_EXPORTS --task_weights ORIGINAL_WEIGHTS using the original method. "
+            "Python callers may instead provide weights_for_ln explicitly in source order."
+        )
+    return weights
+
+
 def _average_ln_from_sources(
     source_pt_paths: List[str],
     weights: Optional[List[float]] = None,
@@ -539,26 +604,34 @@ def _average_ln_from_sources(
     """Compute a weighted average of LayerNorm parameters from save_for_merge exports."""
     import torch
 
-    if weights is None:
-        weights = [1.0 / len(source_pt_paths)] * len(source_pt_paths)
-    else:
-        total = float(sum(weights))
-        weights = [float(w) / total for w in weights]
+    weights = _normalized_ln_weights(source_pt_paths, weights)
 
     acc = None
     for path, w in zip(source_pt_paths, weights):
+        if w == 0:
+            continue
         d = torch.load(path, map_location="cpu", weights_only=False)
         if "_jax_extras" not in d:
             raise KeyError(f"{path} has no _jax_extras; expected a save_for_merge export.")
         ex = d["_jax_extras"]
+        layers = ("enc_LN", "trunk_LN_0", "trunk_LN_1")
+        for layer in layers:
+            if layer not in ex or any(key not in ex[layer] for key in ("scale", "bias")):
+                raise ValueError(f"{path}: missing LayerNorm parameters for {layer}")
+            for key in ("scale", "bias"):
+                value = ex[layer][key]
+                if (not torch.is_tensor(value) or not torch.is_floating_point(value)
+                        or not torch.isfinite(value).all()):
+                    raise ValueError(f"{path}: invalid LayerNorm tensor {layer}.{key}")
         if acc is None:
             acc = {
-                k: {
-                    sk: torch.zeros_like(sv) for sk, sv in v.items()
-                }
-                for k, v in ex.items()
+                layer: {key: torch.zeros_like(ex[layer][key]) for key in ("scale", "bias")}
+                for layer in layers
             }
-        for k, v in ex.items():
-            for sk, sv in v.items():
-                acc[k][sk] = acc[k][sk] + w * sv
+        for layer in layers:
+            for key in ("scale", "bias"):
+                value = ex[layer][key]
+                if value.shape != acc[layer][key].shape:
+                    raise ValueError(f"{path}: incompatible LayerNorm tensor {layer}.{key}")
+                acc[layer][key] = acc[layer][key] + w * value
     return acc

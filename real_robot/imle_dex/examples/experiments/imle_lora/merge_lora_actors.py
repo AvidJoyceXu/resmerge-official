@@ -22,6 +22,34 @@ def get_actor_params(checkpoint):
     raise ValueError("Expected an actor export containing params or merged_params")
 
 
+def prepare_merge_inputs(checkpoint_paths, task_weights=None):
+    """Normalize convex weights and exclude zero-weight inputs before scale estimation."""
+    paths = list(checkpoint_paths)
+    weights = list(task_weights) if task_weights is not None else [1.0] * len(paths)
+    if (not paths or len(weights) != len(paths)
+            or any(not math.isfinite(w) or w < 0 for w in weights)
+            or not any(w > 0 for w in weights)):
+        raise ValueError("Provide one finite nonnegative weight per checkpoint, with a positive sum")
+    active = [(path, float(weight)) for path, weight in zip(paths, weights) if weight > 0]
+    # Scaling first avoids overflow when individually finite weights have a huge sum.
+    scale = max(weight for _, weight in active)
+    total = math.fsum(weight / scale for _, weight in active)
+    return [path for path, _ in active], [weight / scale / total for _, weight in active]
+
+
+def _single_input_params(path, output_path=None):
+    """A single contributing expert needs no pruning, refactorization or norm restoration."""
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    params = get_actor_params(checkpoint)
+    if output_path is not None:
+        result = dict(checkpoint)
+        result.pop("params", None)
+        result.update(merged_params=params, task_weights=[1.0], n_inputs=1,
+                      source_checkpoints=[str(path)], merge_method="single_input")
+        torch.save(result, output_path)
+    return params
+
+
 class DirectionalInterpolationMergeLoRA:
     """
     Norm-preserving directional interpolation: normalize effective matrices W=BA into
@@ -44,15 +72,10 @@ class DirectionalInterpolationMergeLoRA:
         Merge actor checkpoints with directional interpolation. task_weights defaults to
         uniform; optionally save to output_path and return merged parameters.
         """
+        checkpoint_paths, task_weights = prepare_merge_inputs(checkpoint_paths, task_weights)
         n_tasks = len(checkpoint_paths)
-        
-        
-        if task_weights is None:
-            task_weights = [1.0 / n_tasks] * n_tasks
-        else:
-            
-            total_weight = sum(task_weights)
-            task_weights = [w / total_weight for w in task_weights]
+        if n_tasks == 1:
+            return _single_input_params(checkpoint_paths[0], output_path)
         
         print(f"Merging {n_tasks} LoRA Residual Actors using Directional Interpolation...")
         print(f"Task weights: {task_weights}")
@@ -281,15 +304,10 @@ class RobustMergeLoRA:
         Merge checkpoint_paths with optional task_weights (uniform by default), optionally save
         to output_path, and return merged parameters.
         """
+        checkpoint_paths, task_weights = prepare_merge_inputs(checkpoint_paths, task_weights)
         n_tasks = len(checkpoint_paths)
-        
-        
-        if task_weights is None:
-            task_weights = [1.0 / n_tasks] * n_tasks
-        else:
-            
-            total_weight = sum(task_weights)
-            task_weights = [w / total_weight for w in task_weights]
+        if n_tasks == 1:
+            return _single_input_params(checkpoint_paths[0], output_path)
         
         print(f"Merging {n_tasks} LoRA Residual Actors...")
         print(f"Task weights: {task_weights}")
@@ -677,26 +695,25 @@ class RobustMergeLoRAOptimized:
         return the merged parameters.
         """
         n_tasks = len(checkpoint_paths)
-        
-        
+        if not n_tasks:
+            raise ValueError("Provide at least one actor checkpoint")
         if self.adaptive_weights and task_performances is not None:
             if len(task_performances) != n_tasks:
                 print(f"Warning: task_performances length ({len(task_performances)}) != n_tasks ({n_tasks}), using uniform weights")
                 task_weights = [1.0 / n_tasks] * n_tasks
             else:
                 
-                performances = np.array(task_performances)
+                performances = np.asarray(task_performances, dtype=np.float64)
+                if not np.isfinite(performances).all():
+                    raise ValueError("task_performances must be finite")
                 
                 performances = performances - performances.min() + 1e-6
                 task_weights = (performances / performances.sum()).tolist()
                 print(f"Adaptive weights based on performance: {task_weights}")
-        elif task_weights is None:
-            
-            task_weights = [1.0 / n_tasks] * n_tasks
-        else:
-            
-            total_weight = sum(task_weights)
-            task_weights = [w / total_weight for w in task_weights]
+        checkpoint_paths, task_weights = prepare_merge_inputs(checkpoint_paths, task_weights)
+        n_tasks = len(checkpoint_paths)
+        if n_tasks == 1:
+            return _single_input_params(checkpoint_paths[0], output_path)
         
         print(f"Merging {n_tasks} LoRA Residual Actors (Optimized Version)...")
         print(f"Task weights: {task_weights}")
@@ -1095,54 +1112,58 @@ class RobustMergeLoRAOptimized:
         return hierarchical_params
 
 def merge_task_actors(
-    checkpoint_dir: str,
-    task_ids: List[int],
-    output_path: str,
+    checkpoint_dir: Optional[str] = None,
+    task_ids: Optional[List[int]] = None,
+    output_path: str = "merged_actor.pt",
     task_weights: Optional[List[float]] = None,
-    prune_ratio: float = 0.2
+    prune_ratio: float = 0.2,
+    checkpoint_paths: Optional[List[str]] = None,
+    method: str = "robust",
+    overwrite: bool = False,
 ):
-    """
-    Select task exports from checkpoint_dir. For explicit
-    checkpoint paths, use quick_merge.py.
-    """
-    
-    checkpoint_paths = []
-    from datetime import datetime
-    datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    for task_id in task_ids:
-        
-        path = os.path.join(checkpoint_dir, f"task{task_id}_final_{datetime_str}.pt")
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
-        checkpoint_paths.append(path)
-    
-    
-    merger = RobustMergeLoRA(prune_ratio=prune_ratio)
-    merged_params = merger.merge_actors(
-        checkpoint_paths, 
-        task_weights=task_weights,
-        output_path=output_path
+    """Merge explicitly selected exports using the same self-contained format as quick_merge."""
+    if checkpoint_dir is not None or task_ids is not None or not checkpoint_paths:
+        raise ValueError(
+            "Directory/task-id discovery is no longer supported: export filenames identify "
+            "runs and steps. Pass checkpoint_paths=[task_A.pt, task_B.pt, ...], or run "
+            "quick_merge.py --checkpoint_paths task_A.pt task_B.pt --output_path merged_actor.pt."
+        )
+    from quick_merge import merge_exports
+
+    result = merge_exports(
+        checkpoint_paths, output_path, task_weights=task_weights,
+        prune_ratio=prune_ratio, method=method, overwrite=overwrite,
     )
-    
-    return merged_params
+    return result["merged_params"]
 
 if __name__ == "__main__":
     
     import argparse
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint_dir', type=str, required=True)
-    parser.add_argument('--task_ids', type=int, nargs='+', default=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    parser = argparse.ArgumentParser(description="Merge explicit actor exports; delegates to quick_merge.py.")
+    parser.add_argument('--checkpoint_paths', nargs='+', help='Explicit single-task or merged .pt exports')
+    parser.add_argument('--checkpoint_dir', help='Obsolete; use --checkpoint_paths')
+    parser.add_argument('--task_ids', type=int, nargs='+', help='Obsolete; use --checkpoint_paths')
     parser.add_argument('--output_path', type=str, default='merged_actor.pt')
     parser.add_argument('--prune_ratio', type=float, default=0.2)
+    parser.add_argument('--task_weights', type=float, nargs='+')
+    parser.add_argument('--method', choices=('robust', 'optimized', 'directional'), default='robust')
+    parser.add_argument('--overwrite', action='store_true')
     
     args = parser.parse_args()
-    
+    if args.checkpoint_dir is not None or args.task_ids is not None or not args.checkpoint_paths:
+        parser.error(
+            "Use --checkpoint_paths task_A.pt task_B.pt (also supported by quick_merge.py). "
+            "The obsolete --checkpoint_dir/--task_ids interface cannot select run/step exports."
+        )
+
     merged_params = merge_task_actors(
-        checkpoint_dir=args.checkpoint_dir,
-        task_ids=args.task_ids,
+        checkpoint_paths=args.checkpoint_paths,
         output_path=args.output_path,
-        prune_ratio=args.prune_ratio
+        prune_ratio=args.prune_ratio,
+        task_weights=args.task_weights,
+        method=args.method,
+        overwrite=args.overwrite,
     )
     
     print("Merge completed!")

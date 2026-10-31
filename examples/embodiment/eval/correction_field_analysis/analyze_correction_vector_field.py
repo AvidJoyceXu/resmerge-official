@@ -35,7 +35,12 @@ sys.path.insert(0, str(project_root))
 # 导入rlinf模块
 from rlinf.models import get_model
 from rlinf.models.embodiment.residual_policy.lora_residual_policy import LoRAResidualPolicy
+from rlinf.models.embodiment.residual_policy.merge_lora_actors import (
+    _load_lora_params_from_checkpoint,
+    _validate_merge_params,
+)
 from rlinf.models.embodiment.openvla_oft import get_model as get_base_model
+from rlinf.envs.action_utils import prepare_actions_for_libero
 from rlinf.envs.libero.utils import get_benchmark_overridden
 from libero.libero.benchmark import Benchmark
 from libero.libero.envs import OffScreenRenderEnv
@@ -196,10 +201,17 @@ class SimpleLiberoWrapper:
         
         return wrapped_obs
     
-    def reset(self):
+    def reset(self, init_state=None, settle_steps=0, reset_gripper_open=False):
         """重置环境并返回包装后的观察"""
         raw_obs = self.raw_env.reset()
-        # 清空帧堆叠，避免跨 episode 泄漏
+        if init_state is not None:
+            raw_obs = self.raw_env.set_init_state(init_state)
+        zero_action = np.zeros(7)
+        if reset_gripper_open:
+            zero_action[-1] = -1
+        for _ in range(settle_steps):
+            raw_obs, _, _, _ = self.raw_env.step(zero_action)
+        # Start RGB history at the settled observation, never a prior episode/frame.
         self._prev_frame = None
         wrapped_obs = self._wrap_obs(raw_obs)
         return wrapped_obs
@@ -365,10 +377,24 @@ def collect_state_samples_from_base_rollout(base_model, task_suite_name, task_id
     benchmark: Benchmark = get_benchmark_overridden(task_suite_name)()
     task = benchmark.get_task(task_id)
     task_description = task.language
+    init_states = benchmark.get_task_init_states(task_id)
+    train_cfg = cfg.env.train
+    max_trials = train_cfg.get('max_trials_per_task', cfg.env.get('max_trials_per_task'))
+    if max_trials is not None and (isinstance(max_trials, bool) or
+                                   not isinstance(max_trials, int) or max_trials <= 0):
+        raise ValueError('max_trials_per_task must be a positive integer or null')
+    num_trials = min(len(init_states), max_trials) if max_trials is not None else len(init_states)
+    if num_trials == 0:
+        raise ValueError(f'Task {task_id} has no benchmark initialization states')
+    trial_rng = np.random.default_rng(int(train_cfg.get('seed', 0)))
     
     for episode_id in range(num_episodes):
         # 重置环境
-        obs = env.reset()
+        trial_id = int(trial_rng.integers(num_trials))
+        obs = env.reset(
+            init_state=init_states[trial_id], settle_steps=15,
+            reset_gripper_open=bool(train_cfg.get('reset_gripper_open', False)),
+        )
         
         episode_states = []
         step_count = 0
@@ -413,19 +439,27 @@ def collect_state_samples_from_base_rollout(base_model, task_suite_name, task_id
                     do_sample=False,  # eval模式使用确定性策略
                 )
             
-            # 使用Base Model的action执行（不添加residual）
-            # base_actions 已经是 numpy 数组，shape: [B, num_action_chunks, action_dim]
-            action = base_actions[0]  # [num_action_chunks, action_dim]
-            # 取第一个chunk的action
-            action = action[0]  # [action_dim] - 已经是 numpy array
-            
-            next_obs, reward, done, info = env.step(action)
-            
+            # Match training: transform the base policy's gripper convention,
+            # then execute a full action chunk before sampling the next state.
+            chunk_actions = prepare_actions_for_libero(
+                np.array(base_actions, copy=True),
+                model_type=cfg.actor.base_model.model_type,
+            )[0]
+            num_action_chunks = int(cfg.actor.model.num_action_chunks)
+            if chunk_actions.shape[0] != num_action_chunks:
+                raise ValueError(
+                    f"Base model returned {chunk_actions.shape[0]} actions; "
+                    f"config expects {num_action_chunks}"
+                )
+            done = False
+            for action in chunk_actions[:max_steps - step_count]:
+                obs, reward, done, info = env.step(action)
+                step_count += 1
+                if done:
+                    break
+
             if done:
                 break
-            
-            obs = next_obs
-            step_count += 1
         
         if len(episode_states) > 0:
             states_array = np.array(episode_states)  # [T', 74]
@@ -461,6 +495,26 @@ def load_residual_policy(checkpoint_path, cfg, device):
     print(f"\n=== Loading Residual Policy from {checkpoint_path} ===")
     
     checkpoint_path = Path(checkpoint_path)
+
+    def load_full_state(model, state_dict):
+        if not isinstance(state_dict, dict) or any(
+            not isinstance(value, torch.Tensor) or not torch.isfinite(value).all()
+            for value in state_dict.values()
+        ):
+            raise ValueError('Residual state_dict must contain finite tensors')
+        target_dtype = next(model.parameters()).dtype
+        state_dict = {
+            key: value.to(target_dtype) if value.is_floating_point() else value
+            for key, value in state_dict.items()
+        }
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        actor_missing = [key for key in missing if not key.startswith('q_head.')]
+        if actor_missing or unexpected:
+            raise RuntimeError(
+                f'Residual checkpoint does not match the configured model. '
+                f'Missing actor/buffer keys: {sorted(actor_missing)}; '
+                f'unexpected keys: {sorted(unexpected)}'
+            )
     
     # rlinf的checkpoint是huggingface格式，需要加载state_dict
     if checkpoint_path.is_dir():
@@ -486,19 +540,7 @@ def load_residual_policy(checkpoint_path, cfg, device):
         for shard in shards:
             state_dict.update(load_file(str(shard)))
 
-        target_dtype = next(model.parameters()).dtype
-        state_dict = {
-            k: (v.to(target_dtype) if v.is_floating_point() else v)
-            for k, v in state_dict.items()
-        }
-
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        if missing or unexpected:
-            raise RuntimeError(
-                f"Residual checkpoint does not match the model built from config.\n"
-                f"  missing (left at random init): {sorted(missing)}\n"
-                f"  unexpected (ignored): {sorted(unexpected)}"
-            )
+        load_full_state(model, state_dict)
 
         model.eval()
         model.to(device)
@@ -507,19 +549,39 @@ def load_residual_policy(checkpoint_path, cfg, device):
               f"{len(shards)} shard(s)")
     else:
         # 可能是直接的checkpoint文件
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         
         # 创建模型
         model_cfg = cfg.actor.model.copy()
         model = get_model(model_cfg)
         
-        # 加载权重
-        if 'state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['state_dict'], strict=False)
+        if not isinstance(checkpoint, dict):
+            raise ValueError('Residual checkpoint must be a dictionary')
+        # Actor exports use a structured parameter tree, not state_dict keys.
+        if ('params' in checkpoint or 'merged_params' in checkpoint
+                or 'lora_layers' in checkpoint):
+            params = _load_lora_params_from_checkpoint(checkpoint)
+            expected = model.get_lora_parameters()
+            _validate_merge_params(params, str(checkpoint_path), expected['meta'])
+            for group in ('lora_layers', 'output_layers'):
+                for layer, values in expected[group].items():
+                    for key, reference in values.items():
+                        tensor = params[group][layer][key]
+                        if tensor.shape != reference.shape:
+                            raise ValueError(
+                                f'{group}.{layer}.{key} shape {tuple(tensor.shape)} '
+                                f'does not match configured shape {tuple(reference.shape)}'
+                            )
+                        params[group][layer][key] = tensor.to(reference.dtype)
+            if 'state_dict' in checkpoint:
+                load_full_state(model, checkpoint['state_dict'])
+            model.set_lora_parameters(params)
+        elif 'state_dict' in checkpoint:
+            load_full_state(model, checkpoint['state_dict'])
         elif 'model_state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            load_full_state(model, checkpoint['model_state_dict'])
         else:
-            model.load_state_dict(checkpoint, strict=False)
+            load_full_state(model, checkpoint)
         
         model.eval()
         model.to(device)
@@ -579,26 +641,13 @@ def compute_direction_consistency(a1, a2, epsilon=1e-8):
     Returns:
         dir_sim: float, cosine similarity [-1, 1]
     """
-    # Step 1: 计算两个向量的L2范数
+    a1 = np.asarray(a1, dtype=np.float64)
+    a2 = np.asarray(a2, dtype=np.float64)
     norm1 = np.linalg.norm(a1)
     norm2 = np.linalg.norm(a2)
-    
-    # Step 2: 检查是否为零向量
-    if norm1 < epsilon and norm2 < epsilon:
-        # 两个都是零向量，认为方向一致
-        return 1.0
-    
-    if norm1 < epsilon or norm2 < epsilon:
-        # 一个是零向量，认为方向不一致
-        return 0.0
-    
     dot_product = np.dot(a1, a2)
-    dir_sim = dot_product / (norm1 * norm2)
-    
-    # 确保在[-1, 1]范围内（数值误差）
-    dir_sim = np.clip(dir_sim, -1.0, 1.0)
-    
-    return dir_sim
+    # Paper DC: the denominator includes epsilon, including for two zero residuals.
+    return float(np.clip(dot_product / (norm1 * norm2 + epsilon), -1.0, 1.0))
 
 
 def compute_scale_consistency(a1, a2, epsilon=1e-8):
@@ -643,10 +692,10 @@ def compute_magnitude_consistency(a1, a2, epsilon=1e-8):
     unbounded dissimilarity kept here only for backward compatibility with the
     older summary files.
     """
-    norm1 = np.linalg.norm(a1)
-    norm2 = np.linalg.norm(a2)
+    norm1 = np.linalg.norm(np.asarray(a1, dtype=np.float64))
+    norm2 = np.linalg.norm(np.asarray(a2, dtype=np.float64))
 
-    return float(2.0 * min(norm1, norm2) / (norm1 + norm2 + epsilon))
+    return float(np.clip(2.0 * min(norm1, norm2) / (norm1 + norm2 + epsilon), 0.0, 1.0))
 
 
 def pointwise_probe(residual1, residual2, states, device):
@@ -662,6 +711,9 @@ def pointwise_probe(residual1, residual2, states, device):
     Returns:
         results: List[Dict], 每个元素包含一个state的分析结果
     """
+    states = np.asarray(states)
+    if states.ndim != 2 or len(states) == 0 or not np.isfinite(states).all():
+        raise ValueError('Probe states must be a nonempty finite [N, obs_dim] array')
     print(f"\n=== Pointwise Probing on {len(states)} States ===")
     
     results = []
@@ -676,6 +728,10 @@ def pointwise_probe(residual1, residual2, states, device):
         # 获取两个residual policies的actions
         a1 = get_eval_action(residual1, batch_states, device)  # [B, action_dim]
         a2 = get_eval_action(residual2, batch_states, device)  # [B, action_dim]
+        a1, a2 = np.asarray(a1, dtype=np.float64), np.asarray(a2, dtype=np.float64)
+        if (a1.ndim != 2 or a1.shape != a2.shape or a1.shape[0] != len(batch_states)
+                or not np.isfinite(a1).all() or not np.isfinite(a2).all()):
+            raise ValueError('Residual probe actions must be matching finite [B, action_dim] arrays')
         
         # 对每个state计算相似性
         for j in range(len(batch_states)):

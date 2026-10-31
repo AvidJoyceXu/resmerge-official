@@ -10,11 +10,23 @@
 
 </div>
 
-**Learn residuals. Check compatibility. Merge robot policies.** ResMerge enables continual adaptation of a frozen robot policy with lightweight residual experts and Residual-Field Consistency (RFC).
+**Learn residuals. Check compatibility. Merge robot policies.** ResMerge adapts a frozen robot policy to new tasks with lightweight residual experts. Residual-Field Consistency (RFC) compares their action corrections to guide which experts to merge and refine.
 
 ## 🚀 Quick Start
 
-🧪 [Simulation](#-simulation) · 🦾 [Real Robot](#-real-robot)
+```bash
+git clone https://github.com/zhucoffee/resmerge-official.git
+cd resmerge-official
+```
+
+Choose your setup:
+
+| | Base policy & platform | Get started |
+|---|---|---|
+| 🧪 Simulation | OpenVLA-OFT · LIBERO | [Train → RFC → merge → evaluate](#simulation) |
+| 🦾 Real robot | IMLE · Franka + LEAP hand | [Install](#real-robot) · [Full hardware & learning guide](real_robot/README.md) |
+
+<a id="simulation"></a>
 
 ## 🧪 Simulation
 
@@ -22,11 +34,9 @@ Train and merge two residual experts on **LIBERO Object** tasks 6 and 8 with **O
 
 ### 🛠️ Installation
 
-Requires Linux, NVIDIA GPUs, Docker, and the NVIDIA Container Toolkit.
+Requires Linux, NVIDIA GPUs, Docker, and the NVIDIA Container Toolkit. The example below trains and merges **LIBERO Object tasks 6 and 8**. Run the two training commands one at a time.
 
 ```bash
-git clone https://github.com/zhucoffee/resmerge-official.git
-cd resmerge-official
 mkdir -p "$HOME/.cache/huggingface"
 
 docker run -it --gpus all --shm-size 64g \
@@ -63,7 +73,7 @@ bash examples/embodiment/run_embodiment.sh \
   libero_object_task8_lora_residual_sac_openvlaoft
 ```
 
-Checkpoints: `logs/<run>/<experiment>/checkpoints/global_step_<step>/actor/huggingface_model/`. Set the paths to your trained experts:
+Each run saves checkpoints under `logs/<run>/<experiment>/checkpoints/global_step_<step>/actor/huggingface_model/`. Select one checkpoint from each task:
 
 ```bash
 export CKPT6=/absolute/path/to/task6/actor/huggingface_model
@@ -71,11 +81,11 @@ export CKPT8=/absolute/path/to/task8/actor/huggingface_model
 export MERGED=/workspace/RLinf/merged_policy_dir/object_6_8
 ```
 
-Training settings are in the [task configs](examples/embodiment/config/).
+Adjust environment counts and training settings in the [task configs](examples/embodiment/config/). Extra Hydra settings can also be appended to the launcher command.
 
 ### 🔀 Compute RFC & Merge
 
-Measure compatibility between the two experts:
+Measure compatibility on shared states collected by the frozen base policy on both tasks. The analysis compares the first-action corrections at chunk boundaries:
 
 ```bash
 export MUJOCO_GL=osmesa
@@ -89,12 +99,13 @@ python examples/embodiment/eval/correction_field_analysis/analyze_correction_vec
   --obs_mode privileged --tau 0.5
 ```
 
-Merge the pair if its RFC meets the threshold:
+The report gives **DC**, **MC**, and **RFC = DC × MC**. Merge the pair if RFC meets the threshold (`0.5` here):
 
 ```bash
 python toolkits/merge_lora_policies/quick_merge.py \
   --checkpoint_paths "$CKPT6" "$CKPT8" \
-  --output_path "$MERGED" --restore_norm
+  --output_path "$MERGED" --restore_norm \
+  --obs_dim 88 --action_dim 7 --num_action_chunks 8 --actor_input obs
 ```
 
 <details>
@@ -132,11 +143,13 @@ bash examples/embodiment/eval_single_task.sh \
   libero_object_task8_lora_residual_sac_openvlaoft "$MERGED" 8
 ```
 
-Results: `results/single_eval_<timestamp>/`. Replace `$MERGED` with any trained or refined checkpoint to evaluate it.
+Results and videos are saved under `results/single_eval_<timestamp>/`. Replace `$MERGED` with a trained or refined checkpoint to compare policies. See the [merge toolkit](toolkits/merge_lora_policies/README.md) for checkpoint formats and weighted merging.
+
+<a id="real-robot"></a>
 
 ## 🦾 Real Robot
 
-Franka + 16-DoF LEAP hand, with PICO tracking, SpaceMouse and a RealSense camera. Follow the [hardware setup](real_robot/HARDWARE.md), then create the separate Python 3.11 environment:
+Use a **Franka arm + 16-DoF LEAP hand**, with PICO tracking, SpaceMouse and a RealSense camera. From the repository root in a separate host terminal, create the Python 3.11 environment:
 
 ```bash
 cd real_robot
@@ -145,7 +158,7 @@ source .resmerge-venv/bin/activate
 cp hardware.example.env hardware.local.env
 ```
 
-Configure `hardware.local.env` for your devices. The [real-robot guide](real_robot/README.md) covers demonstration collection → IMLE pretraining → residual RL → RFC analysis → merging → evaluation, with commands for each step.
+Configure `hardware.local.env` and follow the [hardware setup](real_robot/HARDWARE.md). The **[real-robot guide →](real_robot/README.md)** walks through environment activation, demonstration collection, IMLE pretraining, residual RL, RFC analysis, merging and evaluation. Its actor and learner launchers use residual scale **α = 0.05**.
 
 ---
 
