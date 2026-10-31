@@ -1,0 +1,59 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+.installed.cfg
+
+# ---- Virtual envs ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Notebooks / tooling caches ----
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Models / checkpoints / data (keep the repo code-only) ----
+*.ckpt
+*.pt
+*.pth
+*.h5
+*.hdf5
+*.pkl
+*.npy
+*.npz
+*.zarr/
+data/outputs/
+wandb/
+
+# ---- OS / editor ----
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Local credentials and machine configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+local_config.*
+
+/hardware.local.env
+.resmerge-venv/
+
+# Generated datasets, run outputs and local logs
+/data/
+/outputs/
+/checkpoints/
+/runs/
+*.log

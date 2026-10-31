@@ -14,6 +14,10 @@
 
 ## 🚀 Quick Start
 
+🧪 [Simulation](#-simulation) · 🦾 [Real Robot](#-real-robot)
+
+## 🧪 Simulation
+
 Train and merge two residual experts on **LIBERO Object** tasks 6 and 8 with **OpenVLA-OFT**.
 
 ### 🛠️ Installation
@@ -130,6 +134,21 @@ bash examples/embodiment/eval_single_task.sh \
 
 Results: `results/single_eval_<timestamp>/`. Replace `$MERGED` with any trained or refined checkpoint to evaluate it.
 
+## 🦾 Real Robot
+
+Franka + 16-DoF LEAP hand, with PICO tracking, SpaceMouse and a RealSense camera. Follow the [hardware setup](real_robot/HARDWARE.md), then create the separate Python 3.11 environment:
+
+```bash
+cd real_robot
+bash install.sh
+source .resmerge-venv/bin/activate
+cp hardware.example.env hardware.local.env
+```
+
+Configure `hardware.local.env` for your devices. The [real-robot guide](real_robot/README.md) covers demonstration collection → IMLE pretraining → residual RL → RFC analysis → merging → evaluation, with commands for each step.
+
 ---
 
-🙏 Built on [RLinf](https://github.com/RLinf/RLinf), [OpenVLA-OFT](https://github.com/moojink/openvla-oft), and [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO). Released under [Apache 2.0](LICENSE).
+🙏 Built on [RLinf](https://github.com/RLinf/RLinf), [OpenVLA-OFT](https://github.com/moojink/openvla-oft), [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO), and [ConRFT](https://github.com/cccedric/conrft).
+
+ResMerge code uses [Apache 2.0](LICENSE). Bundled third-party components retain their [respective licenses](real_robot/THIRD_PARTY.md), including CC BY-NC 4.0 for the LEAP Hand API.

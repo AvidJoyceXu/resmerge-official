@@ -1,0 +1,57 @@
+name: mask
+
+image_shape: [3, 224, 224]
+mask_image_shape: [4, 224, 224]
+dataset_path: ["${oc.env:DATASET_ZARR}"]
+dataset_name: franka_leap_demos
+
+dataset:
+  _target_: psi_policy.dataset.psi_policy_franka_leap_singlergb_dataset.PsiPolicyFrankaLeapSingleRgbDataset
+  zarr_paths: ${task.dataset_path}
+  shape_meta: ${task.shape_meta}
+  n_obs_steps: ${n_obs_steps}
+  horizon: ${n_action_steps}
+  pad_before: 0
+  pad_after: 0
+  seed: 42
+  val_ratio: 0
+  keys: [side_policy_256_0, side_policy_256_1, leap_pose, tcp_force, tcp_pose, tcp_torque, tcp_vel, action]
+
+shape_meta: &shape_meta
+  # acceptable types: rgb, low_dim
+  obs:
+    side_policy_256_0:
+      shape: ${task.image_shape}
+      type: rgb
+      horizon: ${n_obs_steps}
+    side_policy_256_1:
+      shape: ${task.image_shape}
+      type: rgb
+      horizon: ${n_obs_steps}
+    leap_pose:
+      shape: [32]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    tcp_force:
+      shape: [6]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    tcp_pose:
+      shape: [12]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    tcp_torque:
+      shape: [6]
+      type: low_dim
+      horizon: ${n_obs_steps}
+    tcp_vel:
+      shape: [12]
+      type: low_dim
+      horizon: ${n_obs_steps}
+
+  action:
+    shape: [22]
+    horizon: ${n_action_steps}
+
+env_runner:
+  _target_: psi_policy.env_runner.base_image_runner.BaseImageRunner

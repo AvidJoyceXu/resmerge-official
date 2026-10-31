@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xrobotoolkit_teleop"
+version = "1.0.3"
+description = "Teleoperation demo with MuJoCo and UR5 robot"
+requires-python = ">=3.11,<3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Zhigen", email = "zhaozhigen@gmail.com"}
+]
+# ResMerge uses only common.xr_client and utils.dex_hand_utils.
+# Native xrobotoolkit_sdk is installed separately for the host system.
+dependencies = ["numpy", "dex_retargeting"]
+
+[project.optional-dependencies]
+upstream-examples = [
+    "mujoco", "meshcat", "placo", "ur_rtde", "dynamixel-sdk", "rospkg",
+    "torch", "pyrealsense2", "opencv-python", "tyro",
+]
+dev = [
+    "black",
+]
+
+[tool.setuptools]
+packages = ["xrobotoolkit_teleop"]
+
+[tool.setuptools.package-data]
+xrobotoolkit_teleop = ["../assets/**/*"]
+
+[tool.black]
+line-length = 120

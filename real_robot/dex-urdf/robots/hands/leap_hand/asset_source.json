@@ -1,0 +1,25 @@
+{
+  "source": "https://github.com/dexsuite/dex-urdf",
+  "commit": "f5e7132f22108164577fea4c25ef99b5cc0e1900",
+  "urdf_matches_upstream": true,
+  "files": {
+    "meshes/collision/white_tip.obj": "bbc1d4b64f4f4115fb0fd776a14abd9496e339804bf42cb645d30aee13e61f88",
+    "meshes/collision/white_tip_thumb.obj": "80e7c3de59c0b1b141e2c91ffa36374bef11636e362173d7a68a79022829020f",
+    "meshes/visual/dip.mtl": "240a97143e932aba69009abdd728066939517cf808108623a014ef577976caeb",
+    "meshes/visual/dip.obj": "472e054348c5a0e987829e721d5ba8486ddd47d867e416bb45d8d2a2ff917acf",
+    "meshes/visual/fingertip.mtl": "7e972e2fb3bd55d0aac677a6cc41a2c1a6678868ac0b4f1a03af5786540fc3d7",
+    "meshes/visual/fingertip.obj": "6bfa2afb2a06557ce0c54b03baec13522bfe561aabb576bd4701d4704f93ec0f",
+    "meshes/visual/mcp_joint.mtl": "240a97143e932aba69009abdd728066939517cf808108623a014ef577976caeb",
+    "meshes/visual/mcp_joint.obj": "3d7194a6a33626ffcdfce78a0ca854e67b6b49f2e09a3bd62656f94515fdfbec",
+    "meshes/visual/palm_lower.mtl": "240a97143e932aba69009abdd728066939517cf808108623a014ef577976caeb",
+    "meshes/visual/palm_lower.obj": "90d1d9b2a1c9eea15fbeb2232019c6191a55a3c4afa7f7427ce7afa0e3108b07",
+    "meshes/visual/pip.mtl": "240a97143e932aba69009abdd728066939517cf808108623a014ef577976caeb",
+    "meshes/visual/pip.obj": "3fff19dc1f0100bb5f34eaf8a40fcf3db40f96fd7179bb7336e538b21ff8e067",
+    "meshes/visual/thumb_dip.mtl": "240a97143e932aba69009abdd728066939517cf808108623a014ef577976caeb",
+    "meshes/visual/thumb_dip.obj": "5b402876601f2b0b36631e6a54ad20588f88e74f52320b6c902a8bc694578689",
+    "meshes/visual/thumb_fingertip.mtl": "7e972e2fb3bd55d0aac677a6cc41a2c1a6678868ac0b4f1a03af5786540fc3d7",
+    "meshes/visual/thumb_fingertip.obj": "4695d72a70285e8a0132ed4de49876cf99c813182e3a24b172b53631224890de",
+    "meshes/visual/thumb_pip.mtl": "240a97143e932aba69009abdd728066939517cf808108623a014ef577976caeb",
+    "meshes/visual/thumb_pip.obj": "d28876cc3b674323aa7d8a628a4240cda2757c61263b05e86a66280035a2689d"
+  }
+}

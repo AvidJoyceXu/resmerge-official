@@ -1,0 +1,2 @@
+# Unified runtime dependencies
+-r ../../requirements/requirements.txt
