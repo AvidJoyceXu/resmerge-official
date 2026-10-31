@@ -1,6 +1,6 @@
 # 🦾 ResMerge on Real Robots
 
-[📄 Paper](https://openreview.net/forum?id=wLtzr7PNBI) · [🌐 Project](https://resmerge.github.io/) · [🏠 Main README](../README.md) · [🔧 Hardware](HARDWARE.md)
+[📄 Paper](https://openreview.net/forum?id=wLtzr7PNBI) · [🌐 Project](https://resmerge.github.io/) · [🏠 Main README](../README.md) · [🔧 Hardware](HARDWARE.md) · [🧪 Simulation](../sim/README.md)
 
 Real-robot code for ResMerge with a Franka arm and a 16-DoF LEAP right hand. This repository provides IMLE pretraining, task-specific LoRA residual SAC training, residual-field merge analysis, multi-task actor merging and real-robot evaluation. `pick_place` is the supplied task-environment example.
 
@@ -9,6 +9,23 @@ Real-robot code for ResMerge with a Franka arm and a 16-DoF LEAP right hand. Thi
 The IMLE base policy remains frozen during RL. Label episode success or failure using the keyboard. Collect demonstrations and train checkpoints using the steps below.
 
 **Start here:** [Hardware](#1-prepare-the-hardware) → [Installation](#2-install-the-python-environment) → [Demonstrations](#3-teleoperate-and-collect-demonstrations) → [Pretraining](#4-convert-data-and-pretrain-imle) → [Residual RL](#6-run-lora-residual-rl) → [RFC](#8-analyze-whether-task-residuals-are-compatible) → [Merge](#9-merge-the-task-actors) → [Evaluate](#10-evaluate-the-merged-policy-on-every-task).
+
+## 🦾 Robot setup
+
+<p align="center">
+  <img src="../assets/real_robot_setup.png" alt="Franka Panda with a LEAP hand and RealSense camera in the ResMerge tabletop setup" width="640">
+  <br>
+  <sub>Franka Panda + LEAP hand, with an external RealSense camera observing the workspace.</sub>
+</p>
+
+| Component | Role |
+|---|---|
+| Franka Panda + 16-DoF LEAP right hand | Execute the 22-dimensional arm-and-hand action. |
+| RealSense camera | Supply RGB observations to the frozen visual encoder and IMLE base policy. |
+| PICO hand tracking + SpaceMouse | Collect demonstrations and provide hand retargeting / arm control. SpaceMouse also supports arm intervention during RL. |
+| Keyboard | Start/reset episodes and label success or failure. |
+
+Collection → IMLE pretraining → residual RL → RFC → merge → per-task evaluation share the same camera, joint conventions and frozen base checkpoint. The numbered guide below follows this sequence.
 
 ## Repository layout
 

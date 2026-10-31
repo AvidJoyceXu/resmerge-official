@@ -4,6 +4,10 @@ ResMerge supplies the collection → IMLE pretraining → LoRA residual RL Pytho
 
 The supported example expects Franka, a right LEAP hand, one RealSense side camera, a SpaceMouse and PICO hand tracking. To use a different device, implement an adapter for the interfaces below.
 
+<p align="center">
+  <img src="../assets/real_robot_setup.png" alt="ResMerge setup with a Franka Panda, LEAP hand and external RealSense camera" width="560">
+</p>
+
 | Boundary | Expected interface |
 |---|---|
 | Franka server | `FRANKA_SERVER_URL` with trailing `/`; POST `getstate`, `pose`, `update_param`, `clearerr`, `jointreset`, and optional `set_load` |
