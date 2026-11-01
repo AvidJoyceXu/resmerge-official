@@ -40,7 +40,6 @@ from rlinf.models.embodiment.residual_policy.merge_lora_actors import (
     _validate_merge_params,
 )
 from rlinf.models.embodiment.openvla_oft import get_model as get_base_model
-from rlinf.envs.action_utils import prepare_actions_for_libero
 from rlinf.envs.libero.utils import get_benchmark_overridden
 from libero.libero.benchmark import Benchmark
 from libero.libero.envs import OffScreenRenderEnv
@@ -201,17 +200,10 @@ class SimpleLiberoWrapper:
         
         return wrapped_obs
     
-    def reset(self, init_state=None, settle_steps=0, reset_gripper_open=False):
+    def reset(self):
         """重置环境并返回包装后的观察"""
         raw_obs = self.raw_env.reset()
-        if init_state is not None:
-            raw_obs = self.raw_env.set_init_state(init_state)
-        zero_action = np.zeros(7)
-        if reset_gripper_open:
-            zero_action[-1] = -1
-        for _ in range(settle_steps):
-            raw_obs, _, _, _ = self.raw_env.step(zero_action)
-        # Start RGB history at the settled observation, never a prior episode/frame.
+        # 清空帧堆叠，避免跨 episode 泄漏
         self._prev_frame = None
         wrapped_obs = self._wrap_obs(raw_obs)
         return wrapped_obs
@@ -350,11 +342,11 @@ def collect_state_samples_from_demo(task_suite_name, task_id, env, max_demos=5):
     return flattened_states
 
 
-def collect_state_samples_from_base_rollout(base_model, task_suite_name, task_id, env, 
+def collect_state_samples_from_base_rollout(base_model, task_suite_name, task_id, env,
                                             cfg, device, num_episodes=5, max_steps=240):
     """
     使用Base Model实际rollout收集state samples
-    
+
     Args:
         base_model: Base Model实例 (OpenVLA-OFT)
         task_suite_name: 任务suite名称
@@ -364,61 +356,47 @@ def collect_state_samples_from_base_rollout(base_model, task_suite_name, task_id
         device: 设备
         num_episodes: 收集多少个episode
         max_steps: 每个episode最多多少步
-    
+
     Returns:
         states: np.ndarray, [N, obs_dim] - N个state samples
     """
     print(f"\n=== Collecting State Samples from Base Model Rollout (Task {task_id}) ===")
     print(f"Using Base Model to rollout and collect states that RL actually sees")
-    
+
     states_list = []
-    
+
     # 获取任务描述
     benchmark: Benchmark = get_benchmark_overridden(task_suite_name)()
     task = benchmark.get_task(task_id)
     task_description = task.language
-    init_states = benchmark.get_task_init_states(task_id)
-    train_cfg = cfg.env.train
-    max_trials = train_cfg.get('max_trials_per_task', cfg.env.get('max_trials_per_task'))
-    if max_trials is not None and (isinstance(max_trials, bool) or
-                                   not isinstance(max_trials, int) or max_trials <= 0):
-        raise ValueError('max_trials_per_task must be a positive integer or null')
-    num_trials = min(len(init_states), max_trials) if max_trials is not None else len(init_states)
-    if num_trials == 0:
-        raise ValueError(f'Task {task_id} has no benchmark initialization states')
-    trial_rng = np.random.default_rng(int(train_cfg.get('seed', 0)))
-    
+
     for episode_id in range(num_episodes):
         # 重置环境
-        trial_id = int(trial_rng.integers(num_trials))
-        obs = env.reset(
-            init_state=init_states[trial_id], settle_steps=15,
-            reset_gripper_open=bool(train_cfg.get('reset_gripper_open', False)),
-        )
-        
+        obs = env.reset()
+
         episode_states = []
         step_count = 0
-        
+
         while step_count < max_steps:
             # 保存当前state（flatten后的RL state）
             rl_obs = obs['rl_flatten_obs']
             episode_states.append(rl_obs.copy())
-            
+
             # 准备base model输入
             # obs已经是包装后的格式，包含main_images, wrist_images, states等（numpy格式）
             import torch
-            
+
             # 从包装后的观察中提取所需字段（numpy格式）
             main_images_np = obs['main_images']  # [H, W, C] numpy
             wrist_images_np = obs['wrist_images']  # [H, W, C] numpy
             states_np = obs['states']  # [state_dim] numpy
-            
+
             # 转换为tensor并移动到设备
             # 注意：需要先copy()确保数组是连续的（避免负stride问题）
             main_images = torch.from_numpy(main_images_np.copy()).unsqueeze(0).to(device=device, dtype=torch.uint8)  # [1, H, W, C]
             wrist_images = torch.from_numpy(wrist_images_np.copy()).unsqueeze(0).to(device=device, dtype=torch.uint8)  # [1, H, W, C]
             states = torch.from_numpy(states_np.copy()).unsqueeze(0).to(device=device, dtype=torch.float32)  # [1, state_dim]
-            
+
             # 构建base model输入（符合 predict_action_batch 期望的格式）
             env_obs = {
                 'main_images': main_images,  # [1, H, W, C]
@@ -426,7 +404,7 @@ def collect_state_samples_from_base_rollout(base_model, task_suite_name, task_id
                 'states': states,  # [1, state_dim]
                 'task_descriptions': [task_description],
             }
-            
+
             # 获取Base Model的action
             with torch.no_grad():
                 # 预测action（base_model.predict_action_batch 会处理 env_obs）
@@ -438,45 +416,37 @@ def collect_state_samples_from_base_rollout(base_model, task_suite_name, task_id
                     return_obs=False,
                     do_sample=False,  # eval模式使用确定性策略
                 )
-            
-            # Match training: transform the base policy's gripper convention,
-            # then execute a full action chunk before sampling the next state.
-            chunk_actions = prepare_actions_for_libero(
-                np.array(base_actions, copy=True),
-                model_type=cfg.actor.base_model.model_type,
-            )[0]
-            num_action_chunks = int(cfg.actor.model.num_action_chunks)
-            if chunk_actions.shape[0] != num_action_chunks:
-                raise ValueError(
-                    f"Base model returned {chunk_actions.shape[0]} actions; "
-                    f"config expects {num_action_chunks}"
-                )
-            done = False
-            for action in chunk_actions[:max_steps - step_count]:
-                obs, reward, done, info = env.step(action)
-                step_count += 1
-                if done:
-                    break
+
+            # 使用Base Model的action执行（不添加residual）
+            # base_actions 已经是 numpy 数组，shape: [B, num_action_chunks, action_dim]
+            action = base_actions[0]  # [num_action_chunks, action_dim]
+            # 取第一个chunk的action
+            action = action[0]  # [action_dim] - 已经是 numpy array
+
+            next_obs, reward, done, info = env.step(action)
 
             if done:
                 break
-        
+
+            obs = next_obs
+            step_count += 1
+
         if len(episode_states) > 0:
             states_array = np.array(episode_states)  # [T', 74]
             states_list.append(states_array)
             print(f"  Episode {episode_id+1}: collected {len(episode_states)} states")
-    
+
     if len(states_list) == 0:
         print("Error: No valid states collected!")
         return None
-    
+
     # Flatten所有states
     flattened_states = np.concatenate(states_list, axis=0)  # [N, 74]
-    
+
     print(f"Collected {len(states_list)} episodes")
     print(f"Total states: {len(flattened_states)}")
     print(f"State shape: {flattened_states.shape}")
-    
+
     return flattened_states
 
 

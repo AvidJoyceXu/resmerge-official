@@ -68,29 +68,37 @@ The supplied `pick_place` environment is the starting point for your own task co
 
 ## 🧪 Simulation
 
-Train and merge residual experts on **LIBERO Object tasks 6 and 8** with a frozen **OpenVLA-OFT** base policy. The supplied example uses privileged-state residual observations and eight-action chunks.
+Train and merge **OpenVLA-OFT** residual experts on **LIBERO** with RGB observations and proprioception.
+
+| Suite | Released task IDs, in arrival order |
+|---|---|
+| Object | **1, 6, 7, 8, 9** |
+| Spatial | **0, 2, 3, 6, 7** |
 
 ### 🛠️ Install & Train
 
-Requires Linux, NVIDIA GPUs, Docker and the NVIDIA Container Toolkit. Follow the [simulation installation](sim/README.md#installation) to start the container and download the shared base checkpoint. Inside that environment, run from the repository root, one task at a time:
+Use Linux with NVIDIA GPUs, Docker and the NVIDIA Container Toolkit. Follow the [simulation installation](sim/README.md#installation) to activate the OpenVLA-OFT environment and download both suite-specific base checkpoints and the RGB encoder. Then run from the repository root:
 
 ```bash
 bash examples/embodiment/run_embodiment.sh \
-  libero_object_task6_lora_residual_sac_openvlaoft
+  libero_object_task6_lora_residual_sac_openvlaoft_rgb
 
 bash examples/embodiment/run_embodiment.sh \
-  libero_object_task8_lora_residual_sac_openvlaoft
+  libero_spatial_task6_lora_residual_sac_openvlaoft_rgb
 ```
+
+The RGB configs train for 1,000 steps. The [full guide](sim/README.md#train) includes commands for all ten task experts and the checkpoint locations.
 
 ### 🔀 RFC, Merge & Evaluate
 
 | Stage | Next step |
 |---|---|
-| [Compute RFC](sim/README.md#rfc) | Probe both residuals on shared base-policy rollout states and compare direction and magnitude. |
-| [Merge](sim/README.md#merge) | Combine compatible checkpoints with optional norm restoration; [refine](sim/README.md#refine) on the affected tasks. |
-| [Evaluate](sim/README.md#evaluate) | Compare individual and merged policies on both tasks; results and videos are saved under `results/`. |
+| [Compute RFC](sim/README.md#rfc) | Compare RGB residual checkpoints using 2,000 frozen-base rollout states per task. |
+| [Merge](sim/README.md#merge) | Merge compatible experts incrementally using the selected RFC threshold. |
+| [Refine](sim/README.md#refine) | Continue residual RL on the merged expert's tasks. |
+| [Evaluate](sim/README.md#evaluate) | Evaluate individual, merged and refined policies on the released task subsets. |
 
-The [task configs](examples/embodiment/config/) control training settings. The [merge toolkit](toolkits/merge_lora_policies/README.md) documents weighted merging and checkpoint formats.
+This simulation release covers OpenVLA-OFT residual experiments. Small-model experiments and sequential OpenVLA-OFT SFT baseline training are not included.
 
 **[Follow the complete simulation tutorial →](sim/README.md)**
 

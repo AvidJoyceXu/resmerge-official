@@ -4,13 +4,15 @@ Combine compatible simulation residual actors into one checkpoint. For training 
 
 ## Quick Start
 
-Run from the repository root in the simulation environment. This example uses LIBERO Object privileged-state observations: observation dimension 88, action dimension 7, eight actions per chunk and `actor_input=obs`.
+Run from the repository root in the simulation environment. This example uses LIBERO RGB observations: observation dimension 846, action dimension 7, eight actions per chunk and `actor_input=obs`.
+
+Set the checkpoint variables to your trained RGB expert directories (see the [simulation guide](../../sim/README.md#rfc)).
 
 ```bash
 python toolkits/merge_lora_policies/quick_merge.py \
-  --checkpoint_paths /path/to/task6/actor/huggingface_model /path/to/task8/actor/huggingface_model \
+  --checkpoint_paths "$CKPT_I" "$CKPT_J" \
   --output_path merged_policy_dir/object_6_8 \
-  --obs_dim 88 --action_dim 7 --num_action_chunks 8 --actor_input obs \
+  --obs_dim 846 --action_dim 7 --num_action_chunks 8 --actor_input obs \
   --prune_ratio 0.2 --restore_norm
 ```
 
@@ -20,9 +22,9 @@ Use the same frozen base policy, observation encoding and residual scale for all
 
 ```bash
 python toolkits/merge_lora_policies/quick_merge.py \
-  --checkpoint_paths /path/to/expert_A /path/to/expert_B /path/to/expert_C \
+  --checkpoint_paths "$EXPERT_A" "$EXPERT_B" "$EXPERT_C" \
   --output_path merged_policy_dir/weighted \
-  --obs_dim 88 --action_dim 7 --num_action_chunks 8 --actor_input obs \
+  --obs_dim 846 --action_dim 7 --num_action_chunks 8 --actor_input obs \
   --task_weights 0.5 0.3 0.2 --restore_norm
 ```
 
