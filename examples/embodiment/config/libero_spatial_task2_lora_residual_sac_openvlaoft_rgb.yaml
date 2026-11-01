@@ -23,17 +23,17 @@ runner:
   eval_policy_path: ""
   task_type: embodied
   logger:
-    log_path: "../results"
+    log_path: "results"
     project_name: rlinf
     experiment_name: "libero_spatial_task2_single_trial_lora_openvlaoft_rgb"
-    logger_backends: ["wandb"] # wandb, swanlab
+    logger_backends: ["tensorboard"]
 
-  max_epochs: 20000
+  max_epochs: 1000
   max_steps: -1
 
   only_eval: False
   val_check_interval: 100
-  save_interval: 1000
+  save_interval: 500
 
 algorithm:
   update_epoch: 64  # 每个global step更新64次
@@ -109,20 +109,12 @@ env:
   group_name: "EnvGroup"
   enable_offload: False # NOTE: RuntimeError: Environment class LiberoEnv does not support offload
 
-  # Override the default values in env/libero_spatial
-  # Target: 4:1 ratio (transitions collected : network updates)
-  # Calculation: transitions = total_num_envs * num_action_chunks * n_chunk_steps
-  #              where n_chunk_steps = max_steps_per_rollout_epoch / num_action_chunks
-  # Current config: 32 envs * 8 chunks * 1 step = 256 transitions per global step
-  #                 update_epoch = 64
-  #                 Ratio: 256 / 64 = 4:1 ✓
-  # Note: max_steps_per_rollout_epoch must be divisible by num_action_chunks (8)
-  # Alternative: For longer rollouts, use total_num_envs=64, max_steps_per_rollout_epoch=16, update_epoch=256
+  # Each rollout collects 16 environment steps per environment.
   train:
     specific_reset_id: 2
     obs_mode: "rgb"
     max_trials_per_task: 1
-    total_num_envs: 32 # Adjusted to achieve 4:1 ratio (256 transitions per global step)
+    total_num_envs: 32
     auto_reset: True
     ignore_terminations: True
     use_fixed_reset_state_ids: False
@@ -136,7 +128,7 @@ env:
     specific_reset_id: 2
     obs_mode: "rgb"
     max_trials_per_task: 1
-    total_num_envs: 32 # Increased for more comprehensive evaluation (must be divisible by env_world_size)
+    total_num_envs: 32 # Must be divisible by env_world_size
     auto_reset: True
     ignore_terminations: True
     max_episode_steps: 240
@@ -164,9 +156,8 @@ actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
 
-  # Aligned with target config: batch_size=256 per update
   micro_batch_size: 64 # unified with libero_object across all 10 RGB runs
-  global_batch_size: 1024  # Aligned with target batch_size=256
+  global_batch_size: 1024
   seed: 1234
   enable_offload: False  # Disabled for better performance with FSDP full_shard
   model:

@@ -5,7 +5,7 @@
 defaults:
   - env/libero_spatial_task0@env.train
   - env/libero_spatial_task0@env.eval
-  - model/lora_residual_policy@actor.model
+  - model/lora_residual_policy_rgb@actor.model
   - model/openvla_oft@actor.base_model
   - training_backend/fsdp@actor.fsdp_config
   - override hydra/job_logging: stdout
@@ -22,7 +22,7 @@ runner:
   eval_policy_path: ""  # Set this to your checkpoint path or use --checkpoint_i/--checkpoint_j
   task_type: embodied
   logger:
-    log_path: "../results"
+    log_path: "results"
     project_name: rlinf
     experiment_name: "correction_field_analysis"
     logger_backends: []  # No logging for analysis
@@ -55,6 +55,7 @@ env:
   group_name: "EnvGroup"
   enable_offload: False
   train:
+    obs_mode: rgb
     total_num_envs: 1  # Only need 1 env for analysis
     auto_reset: True
     ignore_terminations: True
@@ -66,6 +67,7 @@ env:
     reset_gripper_open: False
   
   eval:
+    obs_mode: rgb
     total_num_envs: 1
     auto_reset: True
     ignore_terminations: True
@@ -93,7 +95,7 @@ actor:
     add_q_head: True
     q_head_type: "default"
     actor_input: ${network.actor_input}
-    obs_dim: 74  # LIBERO RL obs: robot_proprio_state (39-dim) + object_to_robot_relations (35-dim) = 74-dim
+    obs_dim: 846  # RGB checkpoints from the released training configs
   base_model:
     model_type: "openvla_oft"
     precision: ${actor.model.precision}

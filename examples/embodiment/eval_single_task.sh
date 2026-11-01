@@ -12,14 +12,14 @@
 #   bash eval_single_task.sh [config_name] [policy_path] [task_id]
 #
 # 参数说明：
-#   config_name: Hydra配置文件名（不含.yaml后缀），默认为 libero_object_task6_lora_residual_sac_openvlaoft
+#   config_name: Hydra配置文件名（不含.yaml后缀），默认为 libero_object_task6_lora_residual_sac_openvlaoft_rgb
 #   policy_path: 要评估的policy路径（可以是目录路径或文件路径）
 #   task_id: 要评估的task ID (0-9)
 #
 # 示例：
-#   bash examples/embodiment/eval_single_task.sh libero_object_task6_lora_residual_sac_openvlaoft \
-#       /absolute/path/to/checkpoint/actor/huggingface_model \
-#       2
+#   bash examples/embodiment/eval_single_task.sh libero_object_task6_lora_residual_sac_openvlaoft_rgb \
+#       checkpoints/object/task6 \
+#       6
 #
 # 工作原理：
 #   1. 使用Hydra override来设置：
@@ -63,7 +63,7 @@ export HYDRA_FULL_ERROR=1
 # ============================================================================
 
 # 默认配置名称
-BASE_CONFIG_NAME=${1:-"libero_object_task6_lora_residual_sac_openvlaoft"}
+BASE_CONFIG_NAME=${1:-"libero_object_task6_lora_residual_sac_openvlaoft_rgb"}
 
 # 检查参数数量
 if [ $# -lt 3 ]; then
@@ -79,14 +79,14 @@ if [ $# -lt 3 ]; then
     echo "  bash eval_single_task.sh [config_name] [policy_path] [task_id]"
     echo ""
     echo "参数说明:"
-    echo "  config_name: Hydra配置文件名（不含.yaml后缀），可选，默认为 libero_object_task6_lora_residual_sac_openvlaoft"
+    echo "  config_name: Hydra配置文件名（不含.yaml后缀），可选，默认为 libero_object_task6_lora_residual_sac_openvlaoft_rgb"
     echo "  policy_path: 要评估的policy路径（可以是目录路径或文件路径），必需"
     echo "  task_id: 要评估的task ID (0-9)，必需"
     echo ""
     echo "示例:"
-    echo "  bash examples/embodiment/eval_single_task.sh libero_object_task6_lora_residual_sac_openvlaoft \\"
-    echo "      /path/to/policy \\"
-    echo "      2"
+    echo "  bash examples/embodiment/eval_single_task.sh libero_object_task6_lora_residual_sac_openvlaoft_rgb \\"
+    echo "      checkpoints/object/task6 \\"
+    echo "      6"
     echo ""
     echo "注意:"
     echo "  - policy_path可以是目录路径（推荐）或文件路径"

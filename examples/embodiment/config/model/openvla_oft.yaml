@@ -1,6 +1,6 @@
 model_type: "openvla_oft"
 implement_version: "rlinf"
-model_path: "/path/to/model/Openvla-oft-SFT-libero10-traj1/"  # Different paths used in different configs
+model_path: ${residual_policy.base_model_path}
 
 precision: "bf16"
 
