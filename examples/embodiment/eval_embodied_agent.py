@@ -27,7 +27,9 @@ mp.set_start_method("spawn", force=True)
 
 
 @hydra.main(
-    version_base="1.1", config_path="config", config_name="maniskill_ppo_openvlaoft"
+    version_base="1.1",
+    config_path="config",
+    config_name="libero_object_task6_lora_residual_sac_openvlaoft_rgb",
 )
 def main(cfg) -> None:
     cfg.runner.only_eval = True
